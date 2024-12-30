@@ -1,4 +1,7 @@
 __pycache__
 .venv
+.cursorrules
 .vscode
 .env
+*.png
+TODO

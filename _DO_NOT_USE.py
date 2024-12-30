@@ -1,69 +1,15 @@
 import asyncio
 from decimal import Decimal
 from dotenv import load_dotenv
-import os
 import logging
 
-import modal
 import tastytrade
-
-# check Option.occ_to_streamer_symbol, Option.get_option, Option.get_options
-
-# modal functions
-get_options = modal.Function.lookup("get-options", "get_options")
 
 logging.basicConfig(level=logging.INFO)
 
 
 load_dotenv()
 
-
-# try to get cached session
-try:
-    session = ...
-except Exception:
-    ...
-
-try:
-    session = tastytrade.Session(
-        os.getenv("TASTYTRADE_USER"),
-        os.getenv("TASTYTRADE_PASSWORD"),
-    )
-except Exception:
-    logging.error("Failed to create session. Check your credentials.")
-    exit()
-
-try:
-    account = tastytrade.Account.get_account(session, os.getenv("TASTYTRADE_ACCOUNT"))
-except Exception:
-    account = tastytrade.Account.get_accounts(session)[0]
-
-
-def get_balances():
-    balances = account.get_balances(session)
-    return {
-        attr: getattr(balances, attr)
-        for attr in [
-            "cash_balance",
-            "net_liquidating_value",
-            "equity_buying_power",
-            "derivative_buying_power",
-            "margin_equity",
-            "maintenance_excess",
-        ]
-    }
-
-
-def get_positions():
-    return [
-        {
-            "symbol": p.symbol,
-            "quantity": p.quantity,
-            "quantity_direction": p.quantity_direction,
-            "instrument_type": p.instrument_type.value,
-        }
-        for p in account.get_positions(session)
-    ]
 
 
 def get_market_metrics(symbols: list[str]):
