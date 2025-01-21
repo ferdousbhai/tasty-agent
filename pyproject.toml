@@ -1,0 +1,24 @@
+[project]
+name = "tasty-agent"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "python-dotenv",
+    "keyring",
+    "matplotlib",
+    "mcp[cli]>=1.2.0",
+    "modal>=0.72.31",
+    "tastytrade>=9.7",
+    "exchange-calendars>=4.8",
+    "textual>=1.0.0",
+    "textual-dev>=1.7.0",
+    "rich>=13.9.4",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3.4",
+    "pytest-asyncio>=0.25.2",
+]

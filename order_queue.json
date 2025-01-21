@@ -1,0 +1,10 @@
+{
+  "1": [
+    {
+      "symbol": "INTC 50C 2026-01-16",
+      "quantity": 250,
+      "action": "Buy to Open",
+      "dry_run": false
+    }
+  ]
+}
