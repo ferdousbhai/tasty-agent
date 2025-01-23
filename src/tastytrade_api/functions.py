@@ -2,7 +2,7 @@ import logging
 from decimal import Decimal
 from datetime import date, datetime, timedelta
 
-from data_models import Balances, Position, OptionExpirationIV, EarningsData, RelevantMarketMetric
+from .models import Balances, Position, OptionExpirationIV, EarningsData, RelevantMarketMetric
 
 logger = logging.getLogger(__name__)
 
@@ -152,17 +152,37 @@ async def get_market_metrics(session, symbols: list[str]) -> list[RelevantMarket
     return results
 
 
-async def get_bid_ask_price(session, option_desc: str) -> tuple[Decimal, Decimal]:
-    """Get the current bid and ask price for a given option description."""
+async def get_bid_ask_price(session, symbol: str) -> tuple[Decimal, Decimal]:
+    """Get the current bid and ask price for a given symbol.
+
+    Args:
+        symbol: Either a stock symbol (e.g. "SPY") or option description ("SPY 150C 2025-01-19")
+
+    Returns:
+        tuple[Decimal, Decimal]: The (bid_price, ask_price) for the instrument
+
+    Raises:
+        TimeoutError: If no quote is received within 10 seconds; review the symbol and try again
+    """
     from tastytrade.dxfeed import Quote
     from tastytrade import DXLinkStreamer
+    import asyncio
 
-    streamer_symbol = get_option_streamer_symbol(option_desc)
+    # Convert to streamer symbol format if it's an option
+    if ' ' in symbol:
+        streamer_symbol = get_option_streamer_symbol(symbol)
+    else:
+        streamer_symbol = symbol.upper()
 
     async with DXLinkStreamer(session) as streamer:
         await streamer.subscribe(Quote, [streamer_symbol])
-        quote = await streamer.get_event(Quote)
-        return quote.bid_price, quote.ask_price
+
+        try:
+            # Wait for quote with 10 second timeout
+            quote = await asyncio.wait_for(streamer.get_event(Quote), timeout=10.0)
+            return Decimal(str(quote.bid_price)), Decimal(str(quote.ask_price))
+        except asyncio.TimeoutError:
+            raise TimeoutError(f"Timed out waiting for quote data for symbol: {symbol}")
 
 async def _place_order(
     session,
@@ -172,18 +192,26 @@ async def _place_order(
     price: float,
     action: str,
     dry_run: bool = True,
+    check_interval: float = 15.0,
+    max_attempts: int = 20,
+    min_excess_capital: int = 1000,
 ) -> str:
+    """Internal helper that places an order and adjusts the price until filled."""
+    import asyncio
     from tastytrade.order import (
         NewOrder,
         InstrumentType,
         OrderAction,
         OrderTimeInForce,
         OrderType,
+        OrderStatus,
         Leg
     )
+    from tastytrade.instruments import Option
+    from decimal import Decimal
 
     logger.info(
-        "Attempting to place order with symbol=%r, quantity=%r, price=%r, action=%r, dry_run=%r",
+        "Attempting to place order: symbol=%r, quantity=%r, initial_price=%r, action=%r, dry_run=%r",
         symbol,
         quantity,
         price,
@@ -192,16 +220,10 @@ async def _place_order(
     )
 
     instrument = get_instrument_for_symbol(symbol, session)
-
-    # Determine the correct multiplier for either an Option or Equity.
-    if isinstance(instrument, type(None)):
+    if not instrument:
         return "Instrument not found. Cannot place order."
 
-    if instrument.__class__.__name__ == 'Option':
-        multiplier = instrument.shares_per_contract
-    else:
-        multiplier = 1
-
+    multiplier = instrument.shares_per_contract if isinstance(instrument, Option) else 1
     logger.info("Instrument symbol=%r, instrument type=%s, multiplier=%r",
                 instrument.symbol, type(instrument).__name__, multiplier)
 
@@ -216,50 +238,80 @@ async def _place_order(
         logger.info("Calculated order_value=%s against max_value=%s", order_value, max_value)
 
         if order_value > max_value:
-            max_quantity = int((max_value - 1000) / (Decimal(str(price)) * multiplier))  # Subtract 1000 to account for fees/commissions
-            logger.info("Reduced quantity from %s to %s based on max_value.", quantity, max_quantity)
-            if max_quantity <= 0:
+            quantity = int((max_value - min_excess_capital) / (Decimal(str(price)) * multiplier))
+            logger.info("Reduced quantity from %s to %s based on max_value.", quantity, quantity)
+            if quantity <= 0:
                 logger.error("Order rejected: Exceeds available funds or position size limits.")
                 return "Order rejected: Exceeds available funds or position size limits"
-            quantity = max_quantity
 
+    # Create the order leg
+    if action == OrderAction.BUY_TO_OPEN:
         leg = Leg(
-            instrument_type=InstrumentType.EQUITY_OPTION,
+            instrument_type=InstrumentType.EQUITY_OPTION if isinstance(instrument, Option) else InstrumentType.EQUITY,
             symbol=instrument.symbol,
             action=action,
             quantity=quantity
         )
     else:
-        # For equities, you can build a leg normally
         leg = instrument.build_leg(quantity, action)
 
-    order = NewOrder(
+    # Determine price direction multiplier (-1 for buys, 1 for sells)
+    price_multiplier = -1 if action in (OrderAction.BUY_TO_OPEN, OrderAction.BUY_TO_CLOSE) else 1
+    
+    # Create and place initial order
+    initial_order = NewOrder(
         time_in_force=OrderTimeInForce.DAY,
         order_type=OrderType.LIMIT,
         legs=[leg],
-        price=Decimal(str(price)) * (
-            -1 if action in (OrderAction.BUY_TO_OPEN, OrderAction.BUY_TO_CLOSE)
-            else 1
-        )
+        price=Decimal(str(price)) * price_multiplier
     )
-    logger.info("Constructed Tastytrade order: %s", order)
-
-    response = account.place_order(session, order, dry_run=dry_run)
-
-    # Log Tastytrade's response
-    logger.info(
-        "Order response: errors=%s, warnings=%s",
-        response.errors,
-        response.warnings
-    )
-
+    
+    response = account.place_order(session, initial_order, dry_run=dry_run)
     if response.errors:
-        return "Order failed with errors:\n" + "\n".join([str(error) for error in response.errors])
+        return "Order failed with errors:\n" + "\n".join(str(error) for error in response.errors)
 
-    if response.warnings:
-        return "Order placed successfully with warnings:\n" + "\n".join([str(warning) for warning in response.warnings])
+    if dry_run:
+        return "Dry run successful" + (
+            "\nWarnings:\n" + "\n".join(str(w) for w in response.warnings) if response.warnings else ""
+        )
 
-    return "Order placed successfully"
+    # Monitor and adjust order
+    current_order = response.order
+    for attempt in range(max_attempts):
+        await asyncio.sleep(check_interval)
+        
+        orders = account.get_orders(session)
+        order = next((o for o in orders if o.id == current_order.id), None)
+        
+        if not order:
+            return "Order not found during monitoring"
+            
+        if order.status == OrderStatus.FILLED:
+            return "Order filled successfully"
+            
+        if order.status not in (OrderStatus.LIVE, OrderStatus.RECEIVED):
+            return f"Order in unexpected status: {order.status}"
+
+        # Adjust price
+        price_delta = 0.01 if action in (OrderAction.BUY_TO_OPEN, OrderAction.BUY_TO_CLOSE) else -0.01
+        new_price = float(order.price) + price_delta
+        logger.info("Adjusting order price from %s to %s (attempt %d)", order.price, new_price, attempt + 1)
+        
+        # Replace order with new price
+        new_order = NewOrder(
+            time_in_force=OrderTimeInForce.DAY,
+            order_type=OrderType.LIMIT,
+            legs=[leg],
+            price=Decimal(str(new_price)) * price_multiplier
+        )
+        
+        response = account.replace_order(session, order.id, new_order)
+        if response.errors:
+            return f"Failed to adjust order: {response.errors}"
+            
+        current_order = response.order
+
+    return f"Order not filled after {max_attempts} price adjustments"
 
 async def buy_to_open(
     session,
@@ -272,7 +324,7 @@ async def buy_to_open(
     """Buy to open a new stock or option position.
 
     Args:
-        symbol: Either a stock symbol (e.g. "SPY") or option description ("SPY 150C 2025-01-19")
+        symbol: Either a stock symbol (e.g. "SPY") or option description ("INTC 150C 2025-01-19")
         quantity: Number of shares or contracts
         price: Price to buy at
         dry_run: If True, simulates the order without executing it

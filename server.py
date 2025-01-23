@@ -1,17 +1,16 @@
 from typing import Literal
 
-from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
 import matplotlib.pyplot as plt
 
-from order_manager import OrderManager
-from shared_order_logic import (
+from src.core.order_manager import OrderManager
+from src.core.order_logic import (
     load_and_review_queue,
     queue_order,
     execute_orders,
 )
-from tastytrade_login import get_session_and_account
-from tastytrade_functions import (
+from src.tastytrade_api.auth import session, account
+from src.tastytrade_api.functions import (
     get_balances,
     get_positions,
     get_transactions,
@@ -19,14 +18,7 @@ from tastytrade_functions import (
     get_bid_ask_price,
 )
 
-
-load_dotenv()
-
-# Create/Load session & account from the shared function
-session, account = get_session_and_account()
-
 mcp = FastMCP("TastyTrade")
-
 order_manager = OrderManager()
 
 @mcp.tool()
@@ -62,17 +54,26 @@ async def queue_order_tool(
     execution_group: int = 1,
     dry_run: bool = False
 ) -> str:
-    """Queue a new order for later execution.
+    """Queue a new order for later batch execution.
 
     Args:
-        symbol: Trading symbol (e.g., AAPL or INTC 50C 2026-01-16)
-        quantity: Number of shares/contracts
-        action: Order action - either "Buy to Open" or "Sell to Close"
-        execution_group: Group number for batch execution (default: 1)
-        dry_run: Whether this is a test order (default: False)
+        symbol: Trading symbol
+                Format examples:
+                - Stocks: "AAPL", "SPY"
+                - Options: "INTC 50C 2026-01-16"
+        quantity: Number of shares/contracts to trade
+        action: Order direction
+                - "Buy to Open": Open a new long position
+                - "Sell to Close": Close an existing long position
+        execution_group: Batch execution group number (default: 1)
+                        Orders in the same group are executed simultaneously.
+                        Orders in different groups execute sequentially.
+                        Use different groups when orders depend on each other
+                        (e.g., selling one position to free up capital for another).
+        dry_run: If True, simulates the order without actual execution (default: False)
 
     Returns:
-        Confirmation message
+        str: Confirmation message or error details
     """
     order_details = {
         "symbol": symbol,
@@ -129,13 +130,16 @@ async def cancel_orders_tool(
     """Cancel queued orders based on provided filters.
 
     Args:
-        execution_group: If provided, only cancels orders in this group.
-                        If None, cancels orders in all groups.
-        symbol: If provided, only cancels orders for this symbol.
-                If None, cancels all symbols.
+        execution_group: Group number to filter cancellations. 
+                        If None, cancels orders across all groups.
+        symbol: Symbol to filter cancellations.
+                If None, cancels orders for all symbols.
+                Format examples:
+                - Stocks: "SPY", "AAPL"
+                - Options: "SPY 150C 2025-01-19"
 
     Returns:
-        A message describing what was cancelled.
+        str: Message describing which orders were cancelled.
     """
     try:
         result = order_manager.cancel_queued_orders(
@@ -206,21 +210,31 @@ def get_transaction_history(start_date: str | None = None) -> str:
             return "No transactions found for the specified period."
 
         output = ["Transaction History:", ""]
-        output.append(f"{'Date':<12} {'Type':<15} {'Symbol':<15} {'Amount':<15}")
-        output.append("-" * 57)
+        output.append(f"{'Date':<12} {'Sub Type':<15} {'Description':<45} {'Value':<15}")
+        output.append("-" * 90)
 
         for txn in transactions:
+            # Format the date
             date_str = txn.transaction_date.strftime("%Y-%m-%d")
+
+            # Use transaction_sub_type for more clarity
+            sub_type = txn.transaction_sub_type or 'N/A'
+
+            # Use description for more detailed info
+            description = txn.description or 'N/A'
+
+            # Format value with dollar sign
+            value = f"${float(txn.net_value):,.2f}" if txn.net_value is not None else 'N/A'
+
             output.append(
-                f"{date_str:<12} {txn.transaction_type:<15} "
-                f"{txn.symbol:<15} ${txn.amount:,.2f}"
+                f"{date_str:<12} {sub_type:<15} {description:<45} {value:<15}"
             )
         return "\n".join(output)
     except Exception as e:
         return f"Error fetching transactions: {str(e)}"
 
 @mcp.tool()
-async def get_symbol_metrics(symbols: list[str]) -> str:
+async def get_metrics(symbols: list[str]) -> str:
     """Get market metrics for specified symbols including IV rank, liquidity, beta, etc.
 
     Args:
@@ -256,7 +270,7 @@ async def get_symbol_metrics(symbols: list[str]) -> str:
         return f"Error fetching market metrics: {str(e)}"
 
 @mcp.tool()
-async def get_market_prices(symbol: str) -> str:
+async def get_prices(symbol: str) -> str:
     """Get current bid and ask prices for a stock or option.
 
     Args:
@@ -272,7 +286,6 @@ async def get_market_prices(symbol: str) -> str:
             f"{instrument_type} Prices for {symbol}:\n"
             f"Bid: ${float(bid):.2f}\n"
             f"Ask: ${float(ask):.2f}\n"
-            f"Spread: ${float(ask - bid):.2f}"
         )
     except Exception as e:
         return f"Error fetching prices: {str(e)}"

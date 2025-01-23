@@ -3,22 +3,36 @@ import datetime
 from exchange_calendars import get_calendar
 import pytz
 
+def get_time_until_market_open() -> datetime.timedelta:
+    """
+    Get the time remaining until the next market open.
+    If market is already open, returns timedelta of 0.
+
+    Returns:
+        datetime.timedelta representing time until market open
+    """
+    nyse = get_calendar('XNYS')  # NYSE calendar
+    ny_tz = pytz.timezone('America/New_York')
+    current_time = datetime.datetime.now(ny_tz)
+    next_open = nyse.next_open(current_time)
+    delta = next_open - current_time
+
+    if delta.total_seconds() <= 0:
+        return datetime.timedelta(0)
+    return delta
+
 def sleep_until_market_open() -> None:
     """
     Sleep until the next market open time using exchange_calendars.
     If the market is already open, this returns immediately.
     """
-    nyse = get_calendar('XNYS')  # NYSE calendar
-    ny_tz = pytz.timezone('America/New_York')
+    delta = get_time_until_market_open()
+    if delta.total_seconds() <= 0:
+        return
 
     while True:
-        current_time = datetime.datetime.now(ny_tz)
-        # next_open might be same day or next day
-        next_open = nyse.next_open(current_time)
-
-        delta = next_open - current_time
+        delta = get_time_until_market_open()
         if delta.total_seconds() <= 0:
-            # Market is open or we are past that open time
             break
 
         hours, remainder = divmod(delta.seconds, 3600)

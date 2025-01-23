@@ -8,9 +8,9 @@ from rich.console import Console
 from rich.panel import Panel
 from rich import print as rprint
 
-from order_manager import OrderManager
-from utils import is_market_open, sleep_until_market_open
-from shared_order_logic import (
+from src.core.order_manager import OrderManager
+from src.core.utils import is_market_open, get_time_until_market_open
+from src.core.order_logic import (
     load_and_review_queue,
     queue_order,
     execute_orders,
@@ -75,7 +75,7 @@ def prompt_user_for_order():
     action = Prompt.ask(
         "Enter action",
         choices=valid_actions,
-        default=valid_actions[0],  # e.g. default to BUY_TO_OPEN
+        default=valid_actions[0],
     )
 
     # Execution Group
@@ -151,18 +151,33 @@ async def execute_orders_flow():
     """
     console = Console()
 
-    # Decide whether to wait for market open. This code is a CLI-only user experience.
+    # Load tasks and provide feedback
     tasks = load_and_review_queue(manager)
+    if not tasks:
+        console.print("[yellow]No orders in queue to execute.[/yellow]")
+        return
+
+    # Market open check
     non_dry_run_tasks = [t for t in tasks if not t.get("dry_run", False)]
     if non_dry_run_tasks and not is_market_open():
         console.print("[yellow]Market is closed. Waiting for market to open...[/yellow]")
-        with console.status("Sleeping until the market opens...", spinner="dots"):
-            sleep_until_market_open()
+        with console.status("[yellow]Time until market open: ", spinner="dots") as status:
+            try:
+                while not is_market_open():
+                    delta = get_time_until_market_open()
+                    hours, remainder = divmod(int(delta.total_seconds()), 3600)
+                    minutes, seconds = divmod(remainder, 60)
+                    status.update(f"[yellow]Time until market open: {hours:02d}h {minutes:02d}m {seconds:02d}s")
+                    await asyncio.sleep(1)  # Update every second instead of every minute
+            except asyncio.TimeoutError:
+                console.print("[bold red]Timeout waiting for market to open.[/bold red]")
+                return
         console.print("[bold green]Market is now open. Proceeding with execution...[/bold green]")
 
-    # Now call the shared function to actually execute
+    # Execute orders
     try:
-        result = await execute_orders(manager, force=False)
+        with console.status("Executing orders...", spinner="dots"):
+            result = await execute_orders(manager)
         console.print(f"[bold green]{result}[/bold green]")
     except Exception as e:
         console.print(f"[bold red]Error executing tasks:[/bold red] {str(e)}")

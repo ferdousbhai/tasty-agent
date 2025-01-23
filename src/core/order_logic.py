@@ -1,6 +1,6 @@
-from order_manager import OrderManager
-from utils import is_market_open
-from tastytrade_login import get_session_and_account
+from .order_manager import OrderManager
+from .utils import is_market_open
+from src.tastytrade_api.auth import session, account
 
 
 def load_and_review_queue(manager: OrderManager) -> list[dict]:
@@ -43,7 +43,7 @@ async def execute_orders(manager: OrderManager, force: bool = False) -> str:
     # Check if there are any non-dry-run orders that need an open market (unless forced):
     non_dry_run_tasks = [
         item
-        for group, items in manager.task_queue.items()
+        for _, items in manager.task_queue.items()
         for item in items
         if not item.get("dry_run", False)
     ]
@@ -54,8 +54,6 @@ async def execute_orders(manager: OrderManager, force: bool = False) -> str:
         )
 
     try:
-        # Get session and account from shared function
-        session, account = get_session_and_account()
         await manager.execute_queued_tasks(session, account)
         return "All orders executed successfully."
     except Exception as e:

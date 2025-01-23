@@ -5,17 +5,22 @@ from typing import Literal
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 
-from tastytrade_functions import get_bid_ask_price, _place_order
+from src.tastytrade_api.functions import get_bid_ask_price, buy_to_open, sell_to_close
 
 logger = logging.getLogger(__name__)
 
+PROJECT_ROOT = Path(__file__).parents[2] # this file is in src/core
+DATA_DIR = PROJECT_ROOT / "data"
 
 class OrderManager:
     """
     Encapsulates the order queue and related logic.
     """
 
-    def __init__(self, queue_file: Path = Path("order_queue.json")):
+    def __init__(self, queue_file: Path = DATA_DIR / "order_queue.json"):
+        # Create data directory if it doesn't exist
+        DATA_DIR.mkdir(exist_ok=True)
+
         self.queue_file = queue_file
         # Holds all queued tasks by group: {group_number: [ {order_item_dict}, ... ], ...}
         self.task_queue: dict[int, list[dict]] = {}
@@ -90,9 +95,6 @@ class OrderManager:
         """
         Executes all queued tasks (in ascending order of their execution_group).
         Within the same group, tasks run in parallel (async).
-
-        This method also fetches the bid/ask and calculates the limit price at runtime.
-        After all tasks are completed, the queue is cleared from memory and on disk.
         """
         # Reload the queue from file to ensure freshness
         self.load_queue_from_file()
@@ -115,16 +117,32 @@ class OrderManager:
                 raw_mid = (bid + ask) / 2
                 limit_price = Decimal(raw_mid).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
-                # Place order using the runtime price
-                coro = _place_order(
-                    session,
-                    account,
-                    t["symbol"],
-                    t["quantity"],
-                    float(limit_price),
-                    t["action"],
-                    dry_run=t["dry_run"],
-                )
+                # Use appropriate function based on action
+                if t["action"] == "Buy to Open":
+                    coro = buy_to_open(
+                        session,
+                        account,
+                        t["symbol"],
+                        t["quantity"],
+                        float(limit_price),
+                        dry_run=t["dry_run"],
+                    )
+                elif t["action"] == "Sell to Close":
+                    coro = sell_to_close(
+                        session,
+                        account,
+                        t["symbol"],
+                        t["quantity"],
+                        float(limit_price),
+                        dry_run=t["dry_run"],
+                    )
+                else:
+                    logger.error(
+                        "Unsupported action %s for task %d in group %s",
+                        t["action"], idx, group
+                    )
+                    continue
+
                 coros.append(coro)
 
             results = await asyncio.gather(*coros, return_exceptions=True)

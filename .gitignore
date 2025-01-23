@@ -2,6 +2,6 @@ __pycache__
 .venv
 .cursorrules
 .vscode
-.env
-*.png
-TODO
+data
+dist
+uv.lock
