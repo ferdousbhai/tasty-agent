@@ -1,5 +1,7 @@
 from typing import Literal
-
+import threading
+import asyncio
+import logging
 from mcp.server.fastmcp import FastMCP
 import matplotlib.pyplot as plt
 
@@ -17,6 +19,9 @@ from src.tastytrade_api.functions import (
     get_market_metrics,
     get_bid_ask_price,
 )
+from src.core.utils import is_market_open
+
+logger = logging.getLogger(__name__)
 
 mcp = FastMCP("TastyTrade")
 order_manager = OrderManager()
@@ -110,19 +115,62 @@ async def review_queue_tool() -> str:
         )
     return "\n".join(output)
 
-@mcp.tool()
-async def execute_orders_tool(force: bool = False) -> str:
-    """Execute all queued orders, automatically adjusting prices until filled.
-
-    Orders will adjust by $0.01 every 15s (up for buys, down for sells) for up to 20 attempts.
-
-    Args:
-        force: If True, execute even when market is closed (default: False)
-
-    Returns:
-        Execution status message
+def _wait_and_execute_orders(force: bool):
     """
-    return await execute_orders(order_manager, force=force)
+    Background task that waits until the market is open (if not forced)
+    and then executes orders.
+    """
+    # Check if we're forcing execution or if the market is already open
+    if not force:
+        # Sleep until the market opens.
+        while not is_market_open():
+            asyncio.run(asyncio.sleep(1))
+
+    # try to execute the orders
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(execute_orders(order_manager, force=force))
+    except Exception as e:
+        logger.warning(f"[Background Thread] Error in execute_orders: {e}")
+    finally:
+        loop.close()
+
+@mcp.tool()
+def execute_orders_tool(force: bool = False) -> str:
+    """
+    Schedule orders for execution. If the market is closed and force=False,
+    this will schedule them to be executed automatically when the market opens,
+    running in a background thread so as not to block the server.
+
+    Returns a status message.
+    """
+    # 1) Load the queue to see what orders exist
+    order_manager.load_queue_from_file()
+    queued_tasks = [
+        item
+        for _, items in order_manager.task_queue.items()
+        for item in items
+    ]
+    if not queued_tasks:
+        return "No orders in queue."
+
+    # 2) Check for non-dry-run tasks
+    non_dry_run_tasks = [t for t in queued_tasks if not t.get("dry_run", False)]
+
+    # 3) If the market is closed and we have non-dry-run tasks and force is False,
+    #    schedule a background thread to wait until the market opens, then execute.
+    if non_dry_run_tasks and not is_market_open() and not force:
+        thread = threading.Thread(target=_wait_and_execute_orders, args=(force,))
+        thread.daemon = True  # Daemon allows the thread to close with the process
+        thread.start()
+        return "Market is closed. Orders will be executed automatically at market open."
+    else:
+        # Either it's market hours, or the user forced execution. Schedule immediate execution.
+        thread = threading.Thread(target=_wait_and_execute_orders, args=(force,))
+        thread.daemon = True
+        thread.start()
+        return "Orders are being executed now in a background thread."
 
 @mcp.tool()
 async def cancel_orders_tool(
@@ -132,7 +180,7 @@ async def cancel_orders_tool(
     """Cancel queued orders based on provided filters.
 
     Args:
-        execution_group: Group number to filter cancellations. 
+        execution_group: Group number to filter cancellations.
                         If None, cancels orders across all groups.
         symbol: Symbol to filter cancellations.
                 If None, cancels orders for all symbols.
