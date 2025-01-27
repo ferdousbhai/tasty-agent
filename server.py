@@ -112,7 +112,9 @@ async def review_queue_tool() -> str:
 
 @mcp.tool()
 async def execute_orders_tool(force: bool = False) -> str:
-    """Execute all queued orders.
+    """Execute all queued orders, automatically adjusting prices until filled.
+
+    Orders will adjust by $0.01 every 15s (up for buys, down for sells) for up to 20 attempts.
 
     Args:
         force: If True, execute even when market is closed (default: False)

@@ -96,11 +96,10 @@ class OrderManager:
         Executes all queued tasks (in ascending order of their execution_group).
         Within the same group, tasks run in parallel (async).
         """
-        # Reload the queue from file to ensure freshness
         self.load_queue_from_file()
-
-        # Sort groups lowest to highest
         sorted_groups = sorted(self.task_queue.keys())
+        successful_groups = set()
+
         for group in sorted_groups:
             tasks = self.task_queue[group]
             if not tasks:
@@ -109,59 +108,52 @@ class OrderManager:
             logger.info("Executing group=%s with %d tasks...", group, len(tasks))
             coros = []
             for idx, t in enumerate(tasks):
-                # Fetch current bid/ask
                 bid, ask = await get_bid_ask_price(session, t["symbol"])
                 logger.info("Fetched bid=%s, ask=%s for symbol=%s", bid, ask, t["symbol"])
-
-                # Compute mid price, ensure two decimal places
-                raw_mid = (bid + ask) / 2
-                limit_price = Decimal(raw_mid).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-
-                # Use appropriate function based on action
-                if t["action"] == "Buy to Open":
-                    coro = buy_to_open(
-                        session,
-                        account,
-                        t["symbol"],
-                        t["quantity"],
-                        float(limit_price),
-                        dry_run=t["dry_run"],
-                    )
-                elif t["action"] == "Sell to Close":
-                    coro = sell_to_close(
-                        session,
-                        account,
-                        t["symbol"],
-                        t["quantity"],
-                        float(limit_price),
-                        dry_run=t["dry_run"],
-                    )
-                else:
-                    logger.error(
-                        "Unsupported action %s for task %d in group %s",
-                        t["action"], idx, group
-                    )
+                
+                limit_price = Decimal((bid + ask) / 2).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                
+                # Map action to corresponding function
+                action_map = {
+                    "Buy to Open": buy_to_open,
+                    "Sell to Close": sell_to_close
+                }
+                
+                if t["action"] not in action_map:
+                    logger.error("Unsupported action %s for task %d in group %s", t["action"], idx, group)
                     continue
-
-                coros.append(coro)
+                    
+                coros.append(action_map[t["action"]](
+                    session,
+                    account,
+                    t["symbol"],
+                    t["quantity"],
+                    float(limit_price),
+                    dry_run=t["dry_run"],
+                ))
 
             results = await asyncio.gather(*coros, return_exceptions=True)
+            group_success = True
+            
             for idx, res in enumerate(results):
-                if isinstance(res, Exception):
-                    logger.error(
-                        "Task %d in group %s raised an exception: %s",
-                        idx, group, str(res)
-                    )
+                if isinstance(res, Exception) or (isinstance(res, str) and any(x in res.lower() for x in ["rejected", "error"])):
+                    logger.error("Task %d in group %s failed: %s", idx, group, str(res))
+                    group_success = False
                 else:
-                    logger.info(
-                        "Task %d in group %s completed: %s",
-                        idx, group, res
-                    )
+                    logger.info("Task %d in group %s completed: %s", idx, group, res)
 
-        # Clear tasks from in-memory queue and file
-        self.task_queue.clear()
+            if group_success:
+                successful_groups.add(group)
+
+        # Remove successful groups and save
+        for group in successful_groups:
+            del self.task_queue[group]
         self.save_queue_to_file()
-        logger.info("All queued tasks have been executed.")
+        
+        if failed_groups := set(sorted_groups) - successful_groups:
+            logger.warning("Some groups failed execution: %s", failed_groups)
+        else:
+            logger.info("All queued tasks have been executed successfully.")
 
     def cancel_queued_orders(self, execution_group: int | None = None, symbol: str | None = None) -> str:
         """

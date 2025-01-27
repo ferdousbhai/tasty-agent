@@ -15,6 +15,11 @@ from src.core.order_logic import (
     queue_order,
     execute_orders,
 )
+from src.tastytrade_api.auth import session, account
+from src.tastytrade_api.functions import (
+    get_balances,
+    get_positions,
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -227,24 +232,81 @@ async def cancel_orders_flow():
         console.print(f"[bold red]Error cancelling orders:[/bold red] {str(e)}")
 
 
-async def main():
+async def get_balances_flow():
+    """
+    Display current account balances.
+    """
+    console = Console()
+    try:
+        with console.status("Fetching account balances...", spinner="dots"):
+            balances = await get_balances(session, account)
+        
+        # Create a table for better visualization
+        table = Table(title="Account Balances", show_edge=True, header_style="bold magenta", box=None)
+        table.add_column("Metric", style="cyan")
+        table.add_column("Value", justify="right", style="green")
+        
+        table.add_row("Cash Balance", f"${balances.cash_balance:,.2f}")
+        table.add_row("Buying Power", f"${balances.buying_power:,.2f}")
+        table.add_row("Net Liquidating Value", f"${balances.net_liquidating_value:,.2f}")
+        table.add_row("Maintenance Excess", f"${balances.maintenance_excess:,.2f}")
+        
+        console.print(table)
+    except Exception as e:
+        console.print(f"[bold red]Error fetching balances:[/bold red] {str(e)}")
+
+async def get_positions_flow():
+    """
+    Display current open positions.
+    """
+    console = Console()
+    try:
+        with console.status("Fetching open positions...", spinner="dots"):
+            positions = await get_positions(session, account)
+        
+        if not positions:
+            console.print("[yellow]No open positions found.[/yellow]")
+            return
+            
+        # Create a table for positions
+        table = Table(title="Open Positions", show_edge=True, header_style="bold magenta", box=None)
+        table.add_column("Symbol", style="cyan")
+        table.add_column("Type", style="white")
+        table.add_column("Quantity", justify="right", style="white")
+        table.add_column("Value", justify="right", style="green")
+        
+        for pos in positions:
+            table.add_row(
+                pos.symbol,
+                pos.instrument_type,
+                str(pos.quantity),
+                f"${pos.value:,.2f}"
+            )
+            
+        console.print(table)
+    except Exception as e:
+        console.print(f"[bold red]Error fetching positions:[/bold red] {str(e)}")
+
+async def cli():
     """
     Main CLI loop. Using Prompt.ask with a list of choices.
     """
     while True:
         menu_str = (
             "[bold magenta]--- Tastytrade Order Manager CLI ---[/bold magenta]\n"
-            " [bold green]queue[/bold green]   :  Queue an order\n"
-            " [bold green]review[/bold green]  :  Review orders\n"
-            " [bold green]execute[/bold green] :  Execute all queued orders\n"
-            " [bold green]cancel[/bold green]  :  Cancel queued orders\n"
-            " [bold green]quit[/bold green]    :  Exit the CLI\n"
+            " [bold green]queue[/bold green]     :  Queue an order\n"
+            " [bold green]review[/bold green]    :  Review orders\n"
+            " [bold green]execute[/bold green]   :  Execute all queued orders\n"
+            " [bold green]cancel[/bold green]    :  Cancel queued orders\n"
+            " [bold green]balances[/bold green]  :  Show account balances\n"
+            " [bold green]positions[/bold green] :  Show open positions\n"
+            " [bold green]quit[/bold green]      :  Exit the CLI\n"
         )
         rprint(Panel(menu_str, border_style="magenta", title="Main Menu", expand=False))
 
         choice = Prompt.ask(
             "Select an option",
-            choices=["queue", "review", "execute", "cancel", "exit"],
+            choices=["queue", "review", "execute", "cancel", "balances", "positions", "exit"],
             default="queue",
         )
 
@@ -256,6 +318,10 @@ async def main():
             await execute_orders_flow()
         elif choice == "cancel":
             await cancel_orders_flow()
+        elif choice == "balances":
+            await get_balances_flow()
+        elif choice == "positions":
+            await get_positions_flow()
         elif choice in ("exit", "quit"):
             print("Exiting CLI. Goodbye.")
             break
@@ -263,5 +329,5 @@ async def main():
             print("Invalid choice. Please select from the provided list.")
 
 
-if __name__ == "__main__":
-    asyncio.run(main())
+def run():
+    asyncio.run(cli())
