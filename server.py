@@ -3,7 +3,6 @@ import threading
 import asyncio
 import logging
 from mcp.server.fastmcp import FastMCP
-import matplotlib.pyplot as plt
 
 from src.core.order_manager import OrderManager
 from src.core.order_logic import (
@@ -29,27 +28,45 @@ order_manager = OrderManager()
 @mcp.tool()
 def plot_nlv_history(
     time_back: Literal['1d', '1m', '3m', '6m', '1y', 'all'] = '1y'
-) -> None:
-    """Plots account net liquidating value history over time and displays it to the user.
+) -> str:
+    """
+    Plots account net liquidating value history over time and returns base64-encoded PNG string
 
     Args:
         time_back: Time period to plot. Options: '1d', '1m', '3m', '6m', '1y', 'all'
+
+    Returns:
+        str: Base64-encoded PNG data for the generated plot
     """
+    import io
+    import base64
+    import matplotlib
+    import matplotlib.pyplot as plt
+
     # Get historical data
     history = account.get_net_liquidating_value_history(session, time_back=time_back)
 
+    # Use Agg backend for creating the base64 image
+    matplotlib.use("Agg")
+
     # Create the plot
-    plt.figure(figsize=(10, 6))
-    plt.plot([n.time for n in history], [n.close for n in history], 'b-')
+    fig, ax = plt.subplots(figsize=(10, 6))
+    ax.plot([n.time for n in history], [n.close for n in history], 'b-')
+    ax.set_title(f'Portfolio Value History (Past {time_back})')
+    ax.set_xlabel('Date')
+    ax.set_ylabel('Portfolio Value ($)')
+    ax.grid(True)
 
-    # Customize the plot
-    plt.title(f'Portfolio Value History (Past {time_back})')
-    plt.xlabel('Date')
-    plt.ylabel('Portfolio Value ($)')
-    plt.grid(True)
+    # Encode the figure in base64
+    buffer = io.BytesIO()
+    fig.savefig(buffer, format='png')
+    buffer.seek(0)
+    base64_str = base64.b64encode(buffer.read()).decode('utf-8')
 
-    # Display the plot
-    plt.show()
+    # close the figure to free resources
+    plt.close(fig)
+
+    return base64_str
 
 @mcp.tool()
 async def queue_order_tool(
