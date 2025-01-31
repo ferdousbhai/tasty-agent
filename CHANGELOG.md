@@ -2,7 +2,7 @@
 
 All notable changes to tasty-agent will be documented in this file.
 
-## [0.1.3] - 2025-01-30
+## [0.1.3] - 2025-01-31
 
 - Graceful shutdown handling for server process
 - Signal handling for clean termination

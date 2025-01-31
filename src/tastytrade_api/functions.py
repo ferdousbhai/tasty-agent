@@ -383,7 +383,7 @@ async def place_trade(
         price_delta = 0.01 if action == "Buy to Open" else -0.01
         new_price = float(order.price) + price_delta
         mcp.send_log_message(
-            level="info", 
+            level="info",
             data=f"Adjusting order price from ${float(order.price):.2f} to ${new_price:.2f} (attempt {attempt + 1}/{max_attempts})"
         )
 

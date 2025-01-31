@@ -63,15 +63,19 @@ tasty-agent setup
 
 1. `schedule_trade`
    - Schedule a trade for execution
-   - **Note**: Claude Desktop must be running for scheduled trades to execute. Tasks are preserved when Claude Desktop is closed and will resume when reopened.
    - Inputs:
      - `symbol` (string): Stock or option symbol
      - `quantity` (integer): Number of shares/contracts
      - `action` (string): "Buy to Open" or "Sell to Close"
      - `execution_type` (string): "immediate", "once", or "daily"
-     - `run_time` (string, optional): Time to execute in HH:MM format (24-hour)
+     - `run_time` (string, optional): Time to execute in HH:MM format (24-hour), defaults to market open (09:30)
      - `dry_run` (boolean): Simulate without executing
    - Returns: Task ID and confirmation message
+   - Notes:
+     - Immediate trades during market hours execute right away
+     - Immediate trades during market closure are scheduled for next market open
+     - Daily trades repeat every market day at the specified time
+     - One-time trades execute once at the specified time
 
 2. `list_scheduled_trades`
    - List all scheduled trades
@@ -112,7 +116,7 @@ Add this to your `claude_desktop_config.json`:
 }
 ```
 
-**Important**: The tasty-agent server runs as a background process managed by Claude Desktop. Scheduled trades will only execute while Claude Desktop is running. When Claude Desktop is closed, the server gracefully saves all scheduled tasks and resumes them when Claude Desktop is reopened.
+**Important**: The tasty-agent server runs as a background process managed by Claude Desktop. Scheduled trades will only execute while Claude Desktop is running. When Claude Desktop is closed, the server gracefully saves all scheduled tasks and resumes them when Claude Desktop is reopened. Tasks are stored securely in `~/.tasty_agent/scheduled_tasks.json`.
 
 ## Debugging
 
@@ -122,11 +126,10 @@ You can use the MCP inspector to debug the server:
 npx @modelcontextprotocol/inspector uvx tasty-agent
 ```
 
-For logs, run:
+For logs, check:
 
-```bash
-tail -n 20 -f ~/Library/Logs/Claude/mcp*.log
-```
+- macOS: `~/Library/Logs/Claude/mcp*.log`
+- Windows: `%APPDATA%\Claude\logs\mcp*.log`
 
 ## Development
 
@@ -158,6 +161,8 @@ This server handles sensitive financial information and can execute trades. Alwa
 - Use secure credential storage
 - Review queued orders before execution
 - Use dry-run mode for testing
+- Monitor scheduled tasks regularly
+- Keep your Claude Desktop installation up to date
 
 ## License
 
