@@ -8,7 +8,7 @@ Please note that tasty-agent is currently in early development. The functionalit
 
 ## Prerequisites
 
-- Python 3.12 or higher
+- Python 3.12
 - [uv](https://docs.astral.sh/uv/) package manager
 - A TastyTrade account
 
@@ -31,7 +31,7 @@ uvx tasty-agent
 The server requires TastyTrade credentials. For security, these are set up via command line and stored in your system's keyring (Keychain on macOS, Windows Credential Manager on Windows, or similar secure storage on other platforms):
 
 ```bash
-tasty-setup
+tasty-agent setup
 ```
 
 ### Tools
@@ -42,47 +42,46 @@ tasty-setup
    - Plots account net liquidating value history over time
    - Input:
      - `time_back` (string): Time period to plot ('1d', '1m', '3m', '6m', '1y', 'all')
-   - Returns: Displays a matplotlib plot of portfolio value history
-   - Example response: `"Generated plot showing NLV trend from $10,000 to $12,500 over the last 3 months"`
+   - Returns: Base64-encoded PNG image of the generated plot
 
 2. `get_account_balances`
    - Get current account balances
-   - Returns: Formatted string with cash balance, buying power, and net liquidating value
+   - Returns: Formatted string with cash balance, buying power, net liquidating value, and maintenance excess
    - Example response: `"Cash: $5,000.00, Buying Power: $10,000.00, NLV: $15,000.00"`
 
 3. `get_open_positions`
    - Get all currently open positions
-   - Returns: Formatted string showing all open positions
-   - Example response: `"AAPL: 100 shares @ $150.00, TSLA 300P 2024-06-21: -2 contracts @ $5.00"`
+   - Returns: Formatted table showing Symbol, Position Type, Quantity, and Current Value
 
-#### Order Management
+4. `get_transaction_history`
+   - Get transaction history
+   - Input:
+     - `start_date` (string, optional): Start date in YYYY-MM-DD format
+   - Returns: Formatted table showing Transaction Date, Transaction Type, Description, and Value
 
-1. `queue_order_tool`
-   - Queue a new order for later execution
+#### Trade Management
+
+1. `schedule_trade`
+   - Schedule a trade for execution
+   - **Note**: Claude Desktop must be running for scheduled trades to execute. Tasks are preserved when Claude Desktop is closed and will resume when reopened.
    - Inputs:
-     - `symbol` (string): Trading symbol (e.g., "AAPL" or "INTC 50C 2026-01-16")
+     - `symbol` (string): Stock or option symbol
      - `quantity` (integer): Number of shares/contracts
      - `action` (string): "Buy to Open" or "Sell to Close"
-     - `execution_group` (integer, optional): Group number for batch execution
-     - `dry_run` (boolean, optional): Test order without execution
-   - Returns: Order confirmation message
+     - `execution_type` (string): "immediate", "once", or "daily"
+     - `run_time` (string, optional): Time to execute in HH:MM format (24-hour)
+     - `dry_run` (boolean): Simulate without executing
+   - Returns: Task ID and confirmation message
 
-2. `review_queue_tool`
-   - Review all currently queued orders
-   - Returns: Formatted string showing all queued orders
+2. `list_scheduled_trades`
+   - List all scheduled trades
+   - Returns: Formatted table showing Task ID, Time, Type, and Description
 
-3. `execute_orders_tool`
-   - Execute all queued orders
+3. `remove_scheduled_trade`
+   - Remove a scheduled trade
    - Input:
-     - `force` (boolean, optional): Execute even when market is closed
-   - Returns: Execution status message
-
-4. `cancel_orders_tool`
-   - Cancel queued orders based on filters
-   - Inputs:
-     - `execution_group` (integer, optional): Group number to cancel
-     - `symbol` (string, optional): Symbol to cancel
-   - Returns: Cancellation confirmation message
+     - `task_id` (string): ID of task to remove
+   - Returns: Confirmation message
 
 #### Market Analysis
 
@@ -90,19 +89,13 @@ tasty-setup
    - Get market metrics for specified symbols
    - Input:
      - `symbols` (string[]): List of stock symbols
-   - Returns: Formatted string showing IV rank, liquidity, beta, etc.
+   - Returns: Formatted table showing IV Rank, IV Percentile, Beta, Liquidity Rating, and Next Earnings Date
 
 2. `get_prices`
    - Get current bid and ask prices
    - Input:
      - `symbol` (string): Stock or option symbol
-   - Returns: Formatted string showing bid and ask prices
-
-3. `get_transaction_history`
-   - Get transaction history
-   - Input:
-     - `start_date` (string, optional): Start date in YYYY-MM-DD format
-   - Returns: Formatted string showing transaction history
+   - Returns: Current bid and ask prices
 
 ## Usage with Claude Desktop
 
@@ -118,6 +111,8 @@ Add this to your `claude_desktop_config.json`:
   }
 }
 ```
+
+**Important**: The tasty-agent server runs as a background process managed by Claude Desktop. Scheduled trades will only execute while Claude Desktop is running. When Claude Desktop is closed, the server gracefully saves all scheduled tasks and resumes them when Claude Desktop is reopened.
 
 ## Debugging
 

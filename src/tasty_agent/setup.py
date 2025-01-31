@@ -7,7 +7,7 @@ from tastytrade import Session, Account
 
 console = Console()
 
-def setup_tastytrade_auth():
+def auth():
     """Interactive command-line setup for Tastytrade credentials."""
     console.print("[bold]Setting up Tastytrade credentials[/bold]")
     console.print("=" * 35)
@@ -67,6 +67,3 @@ def setup_tastytrade_auth():
         return False
 
     return True
-
-if __name__ == "__main__":
-    setup_tastytrade_auth()

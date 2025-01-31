@@ -2,6 +2,7 @@ import asyncio
 import logging
 from decimal import Decimal
 from datetime import date, datetime, timedelta
+from typing import Literal
 
 from tastytrade import DXLinkStreamer, metrics
 from tastytrade.dxfeed import Quote
@@ -22,7 +23,6 @@ logger = logging.getLogger(__name__)
 
 # Maximum percentage of net liquidating value for any single position
 MAX_POSITION_SIZE_PCT = 0.40  # 40%
-
 # Common symbol formats accepted throughout this module:
 # - Stock symbol (e.g. "SPY")
 # - Option description (e.g. "SPY 150C 2025-01-19" or "SPY 150 C 2025-01-19")
@@ -131,10 +131,7 @@ def get_transactions(session, account, start_date: str | None = None):
         except ValueError:
             raise ValueError("start_date must be in YYYY-MM-DD format (e.g., '2024-01-01')")
 
-    history = account.get_history(session, start_date=date_obj)
-
-    return history
-
+    return account.get_history(session, start_date=date_obj)
 
 async def get_market_metrics(session, symbols: list[str]) -> list[RelevantMarketMetric]:
     """
@@ -189,109 +186,175 @@ async def get_market_metrics(session, symbols: list[str]) -> list[RelevantMarket
     return results
 
 async def get_bid_ask_price(session, symbol: str) -> tuple[Decimal, Decimal]:
-    """Get the current bid and ask price for a given symbol.
-
-    Args:
-        symbol: Can be any of:
-            - A stock symbol (e.g. "SPY")
-            - A string description (e.g. "SPY 150C 2025-01-19")
-            - An OCC symbol (e.g. "SPY250119C00150000")
-
-    Returns:
-        tuple[Decimal, Decimal]: The (bid_price, ask_price) for the instrument
-
-    Raises:
-        TimeoutError: If no quote is received within 10 seconds; review the symbol and try again
-    """
+    """Get the current bid and ask price for a given symbol."""
     instrument = get_instrument_for_symbol(symbol, session)
 
     streamer_symbol = instrument.streamer_symbol or instrument.symbol
-    logger.info("Using streamer symbol: %s", streamer_symbol)
 
     async with DXLinkStreamer(session) as streamer:
         await streamer.subscribe(Quote, [streamer_symbol])
 
         try:
-            # Wait for quote with 10 second timeout
             quote = await asyncio.wait_for(streamer.get_event(Quote), timeout=10.0)
-            return Decimal(str(quote.bid_price)), Decimal(str(quote.ask_price))
+            bid, ask = Decimal(str(quote.bid_price)), Decimal(str(quote.ask_price))
+            return bid, ask
         except asyncio.TimeoutError:
             raise TimeoutError(f"Timed out waiting for quote data for symbol: {streamer_symbol}")
 
-async def _place_order(
+async def place_trade(
     session,
     account,
     symbol: str,
     quantity: int,
-    price: float,
-    action: str,
+    action: Literal["Buy to Open", "Sell to Close"],
+    mcp,
     dry_run: bool = True,
     check_interval: float = 15.0,
     max_attempts: int = 20,
-    min_excess_capital: int = 900,
 ) -> str:
-    """Internal helper that places an order and adjusts the price until filled.
+    """Place a trade order (buy to open or sell to close).
 
     Args:
-        symbol: Either:
-            - A stock symbol (e.g. "SPY")
-            - A string description (e.g. "SPY 150C 2025-01-19")
+        session: TastyTrade session
+        account: TastyTrade account
+        symbol: Trading symbol
+        quantity: Number of shares/contracts
+        action: Trade action - either "Buy to Open" or "Sell to Close"
+        mcp: MCP instance for logging to Claude Desktop
+        dry_run: If True, simulates the order
+        check_interval: Seconds to wait between price adjustment attempts
+        max_attempts: Maximum number of price adjustments to attempt
     """
     instrument = get_instrument_for_symbol(symbol, session)
     if not instrument:
+        mcp.send_log_message(level="error", data=f"Instrument not found for symbol: {symbol}")
         return "Instrument not found. Cannot place order."
 
-    multiplier = instrument.shares_per_contract if isinstance(instrument, Option) else 1
-    logger.info("Instrument symbol=%r, instrument type=%s, multiplier=%r",
-                instrument.symbol, type(instrument).__name__, multiplier)
+    # Get current price
+    try:
+        bid, ask = await get_bid_ask_price(session, symbol)
+        # Use ask price for buying, bid price for selling
+        price = float(ask if action == "Buy to Open" else bid)
+    except Exception as e:
+        error_msg = f"Failed to get price for {symbol}: {str(e)}"
+        mcp.send_log_message(level="error", data=error_msg)
+        return error_msg
 
-    # Check buying power and position size limits for buy orders
-    if action == OrderAction.BUY_TO_OPEN:
+    if action == "Buy to Open":
+        multiplier = instrument.shares_per_contract if isinstance(instrument, Option) else 1
+        
+        # Check buying power and position size limits
         balances = await get_balances(session, account)
         order_value = Decimal(str(price)) * Decimal(str(quantity)) * Decimal(multiplier)
         max_value = min(
             balances.buying_power,
             balances.net_liquidating_value * Decimal(str(MAX_POSITION_SIZE_PCT))
         )
-        logger.info("Calculated order_value=%s against max_value=%s", order_value, max_value)
+
+        mcp.send_log_message(
+            level="info",
+            data=f"Order value: ${order_value:,.2f}, Max allowed: ${max_value:,.2f}"
+        )
 
         if order_value > max_value:
-            quantity = int((max_value - min_excess_capital) / (Decimal(str(price)) * multiplier))
-            logger.info("Reduced quantity from %s to %s based on max_value.", quantity, quantity)
+            original_quantity = quantity
+            quantity = int(max_value / (Decimal(str(price)) * multiplier))
+            mcp.send_log_message(
+                level="warning",
+                data=f"Reduced order quantity from {original_quantity} to {quantity} due to position limits"
+            )
             if quantity <= 0:
-                logger.error("Order rejected: Exceeds available funds or position size limits.")
+                mcp.send_log_message(
+                    level="error",
+                    data="Order rejected: Exceeds available funds or position size limits"
+                )
                 return "Order rejected: Exceeds available funds or position size limits"
 
+    else:  # Sell to Close
+        # Get current positions and orders
+        positions = await get_positions(session, account)
+        position = next((p for p in positions if p.symbol == instrument.symbol), None)
+        if not position:
+            mcp.send_log_message(
+                level="error",
+                data=f"No open position found for {instrument.symbol}"
+            )
+            return f"Error: No open position found for {instrument.symbol}"
+
+        # Get existing orders to check for pending sell orders
+        orders = account.get_live_orders(session)
+        pending_sell_quantity = sum(
+            sum(leg.quantity for leg in order.legs)
+            for order in orders
+            if (order.status in (OrderStatus.LIVE, OrderStatus.RECEIVED) and
+                any(leg.symbol == instrument.symbol and
+                    leg.action == OrderAction.SELL_TO_CLOSE
+                    for leg in order.legs))
+        )
+
+        # Calculate available quantity to sell
+        available_quantity = position.quantity - pending_sell_quantity
+        mcp.send_log_message(
+            level="info",
+            data=f"Position: {position.quantity}, Pending sells: {pending_sell_quantity}, Available: {available_quantity}"
+        )
+
+        if available_quantity <= 0:
+            error_msg = (f"Cannot place order - entire position of {position.quantity} "
+                        f"already has pending sell orders")
+            mcp.send_log_message(level="error", data=error_msg)
+            return f"Error: {error_msg}"
+
+        # Adjust requested quantity if it exceeds available
+        if quantity > available_quantity:
+            mcp.send_log_message(
+                level="warning",
+                data=f"Reducing sell quantity from {quantity} to {available_quantity} (maximum available)"
+            )
+            quantity = available_quantity
+
+        if quantity <= 0:
+            error_msg = f"Position quantity ({available_quantity}) insufficient for requested sale"
+            mcp.send_log_message(level="error", data=error_msg)
+            return f"Error: {error_msg}"
+
     # Create the order leg
-    if action == OrderAction.BUY_TO_OPEN:
+    order_action = OrderAction.BUY_TO_OPEN if action == "Buy to Open" else OrderAction.SELL_TO_CLOSE
+    if action == "Buy to Open":
         leg = Leg(
             instrument_type=InstrumentType.EQUITY_OPTION if isinstance(instrument, Option) else InstrumentType.EQUITY,
             symbol=instrument.symbol,
-            action=action,
+            action=order_action,
             quantity=quantity
         )
-    else:
-        leg = instrument.build_leg(quantity, action)
-
-    # Determine price direction multiplier (-1 for buys, 1 for sells)
-    price_multiplier = -1 if action in (OrderAction.BUY_TO_OPEN, OrderAction.BUY_TO_CLOSE) else 1
+    else:  # Sell to Close
+        leg = instrument.build_leg(quantity, order_action)
 
     # Create and place initial order
+    mcp.send_log_message(
+        level="info",
+        data=f"Placing initial order: {action} {quantity} {symbol} @ ${price:.2f}"
+    )
+
     initial_order = NewOrder(
         time_in_force=OrderTimeInForce.DAY,
         order_type=OrderType.LIMIT,
         legs=[leg],
-        price=Decimal(str(price)) * price_multiplier
+        price=Decimal(str(price)) * (-1 if action == "Buy to Open" else 1)
     )
 
     response = account.place_order(session, initial_order, dry_run=dry_run)
     if response.errors:
-        return "Order failed with errors:\n" + "\n".join(str(error) for error in response.errors)
+        error_msg = "Order failed with errors:\n" + "\n".join(str(error) for error in response.errors)
+        mcp.send_log_message(level="error", data=error_msg)
+        return error_msg
 
     if dry_run:
-        return "Dry run successful" + (
-            "\nWarnings:\n" + "\n".join(str(w) for w in response.warnings) if response.warnings else ""
-        )
+        msg = "Dry run successful"
+        if response.warnings:
+            msg += "\nWarnings:\n" + "\n".join(str(w) for w in response.warnings)
+        mcp.send_log_message(level="info", data=msg)
+        return msg
 
     # Monitor and adjust order
     current_order = response.order
@@ -302,126 +365,44 @@ async def _place_order(
         order = next((o for o in orders if o.id == current_order.id), None)
 
         if not order:
-            return "Order not found during monitoring"
+            error_msg = "Order not found during monitoring"
+            mcp.send_log_message(level="error", data=error_msg)
+            return error_msg
 
         if order.status == OrderStatus.FILLED:
-            return "Order filled successfully"
+            success_msg = "Order filled successfully"
+            mcp.send_log_message(level="info", data=success_msg)
+            return success_msg
 
         if order.status not in (OrderStatus.LIVE, OrderStatus.RECEIVED):
-            return f"Order in unexpected status: {order.status}"
+            error_msg = f"Order in unexpected status: {order.status}"
+            mcp.send_log_message(level="error", data=error_msg)
+            return error_msg
 
         # Adjust price
-        price_delta = 0.01 if action in (OrderAction.BUY_TO_OPEN, OrderAction.BUY_TO_CLOSE) else -0.01
+        price_delta = 0.01 if action == "Buy to Open" else -0.01
         new_price = float(order.price) + price_delta
-        logger.info("Adjusting order price from %s to %s (attempt %d)", order.price, new_price, attempt + 1)
+        mcp.send_log_message(
+            level="info", 
+            data=f"Adjusting order price from ${float(order.price):.2f} to ${new_price:.2f} (attempt {attempt + 1}/{max_attempts})"
+        )
 
         # Replace order with new price
         new_order = NewOrder(
             time_in_force=OrderTimeInForce.DAY,
             order_type=OrderType.LIMIT,
             legs=[leg],
-            price=Decimal(str(new_price)) * price_multiplier
+            price=Decimal(str(new_price)) * (-1 if action == "Buy to Open" else 1)
         )
 
         response = account.replace_order(session, order.id, new_order)
         if response.errors:
-            return f"Failed to adjust order: {response.errors}"
+            error_msg = f"Failed to adjust order: {response.errors}"
+            mcp.send_log_message(level="error", data=error_msg)
+            return error_msg
 
         current_order = response.order
 
-    return f"Order not filled after {max_attempts} price adjustments"
-
-async def buy_to_open(
-    session,
-    account,
-    symbol: str,
-    quantity: int,
-    price: float,
-    dry_run: bool = True,
-) -> str:
-    """Buy to open a new stock or option position.
-
-    Args:
-        symbol: Either:
-            - A stock symbol (e.g. "SPY")
-            - A string description (e.g. "SPY 150C 2025-01-19")
-        quantity: Number of shares or contracts
-        price: Price to buy at
-        dry_run: If True, simulates the order without executing it
-
-    Returns:
-        str: Success message, warnings, and errors if any
-    """
-    return await _place_order(
-        session,
-        account,
-        symbol,
-        quantity,
-        price,
-        OrderAction.BUY_TO_OPEN,
-        dry_run=dry_run
-    )
-
-async def sell_to_close(
-    session,
-    account,
-    symbol: str,
-    quantity: int,
-    price: float,
-    dry_run: bool = True,
-) -> str:
-    """Sell to close an existing position (stock or option).
-
-    Args:
-        symbol: Either:
-            - A stock symbol (e.g. "SPY")
-            - A string description (e.g. "SPY 150C 2025-01-19")
-        quantity: Number of shares or contracts
-        price: Price to sell at
-        dry_run: If True, simulates the order without executing it
-
-    Returns:
-        str: Success message, warnings, and errors if any
-    """
-    instrument = get_instrument_for_symbol(symbol, session)
-
-    # Get current positions and orders
-    positions = await get_positions(session, account)
-    position = next((p for p in positions if p.symbol == instrument.symbol), None)
-    if not position:
-        return f"Error: No open position found for {instrument.symbol}"
-
-    # Get existing orders to check for pending sell orders
-    orders = account.get_live_orders(session)  # Changed from get_orders() to get_live_orders()
-    pending_sell_quantity = sum(
-        sum(leg.quantity for leg in order.legs)
-        for order in orders
-        if (order.status in (OrderStatus.LIVE, OrderStatus.RECEIVED) and
-            any(leg.symbol == instrument.symbol and 
-                leg.action == OrderAction.SELL_TO_CLOSE 
-                for leg in order.legs))
-    )
-
-    # Calculate available quantity to sell (position size minus pending sells)
-    available_quantity = position.quantity - pending_sell_quantity
-    logger.info("Position quantity=%d, pending sell quantity=%d, available=%d",
-                position.quantity, pending_sell_quantity, available_quantity)
-
-    if available_quantity <= 0:
-        return (f"Error: Cannot place order - entire position of {position.quantity} "
-                f"already has pending sell orders")
-
-    # Adjust requested quantity if it exceeds available
-    quantity = min(quantity, available_quantity)
-    if quantity <= 0:
-        return f"Error: Position quantity ({available_quantity}) insufficient for requested sale"
-
-    return await _place_order(
-        session,
-        account,
-        symbol,
-        quantity,
-        price,
-        OrderAction.SELL_TO_CLOSE,
-        dry_run=dry_run
-    )
+    final_msg = f"Order not filled after {max_attempts} price adjustments"
+    mcp.send_log_message(level="warning", data=final_msg)
+    return final_msg

@@ -10,7 +10,7 @@ dependencies = [
     "mcp[cli]>=1.2.0",
     "tastytrade>=9.7",
     "exchange-calendars>=4.8",
-    "rich>=13.9.4",
+    "apscheduler>=3.11.0",
 ]
 authors = [
     { name = "Ferdous", email = "ferdous@hey.com" }
@@ -25,16 +25,11 @@ classifiers = [
 ]
 
 [project.scripts]
-tasty-agent = "server:mcp.run"
-tasty-setup = "src.tastytrade_api.setup_auth:setup_tastytrade_auth"
-tasty-cli = "cli:run"
+tasty-agent = "src.tasty_agent.server:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
-[tool.uv]
-package = true
-
 [tool.hatch.build.targets.wheel]
-packages = ["src", "."]
+packages = ["src"]
