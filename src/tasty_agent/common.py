@@ -1,5 +1,9 @@
 import keyring
 from tastytrade import Session, Account
+from mcp.server.fastmcp import FastMCP
+
+# Initialize MCP server
+mcp = FastMCP("TastyTrade")
 
 username = keyring.get_password("tastytrade", "username")
 password = keyring.get_password("tastytrade", "password")

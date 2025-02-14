@@ -10,7 +10,6 @@ dependencies = [
     "mcp[cli]>=1.2.0",
     "tastytrade>=9.7",
     "exchange-calendars>=4.8",
-    "apscheduler>=3.11.0",
 ]
 authors = [
     { name = "Ferdous", email = "ferdous@hey.com" }
