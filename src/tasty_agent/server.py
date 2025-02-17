@@ -14,25 +14,32 @@ from tastytrade import metrics
 from .auth_cli import auth
 from .common import mcp, session, account
 from .task import Task, scheduled_tasks
+from .instrument import create_instrument
 
 logger = logging.getLogger(__name__)
 
 
 @mcp.tool()
 async def schedule_trade(
-    symbol: str,
-    quantity: int,
     action: Literal["Buy to Open", "Sell to Close"],
+    quantity: int,
+    underlying_symbol: str,
+    strike: float | None = None,
+    option_type: Literal["C", "P"] | None = None,
+    expiration_date: str | None = None,
     execution_type: Literal["immediate", "once", "daily"] = "immediate",
     run_time: str | None = None,
-    dry_run: bool = True
+    dry_run: bool = True,
 ) -> str:
     """Schedule a trade for execution.
 
     Args:
-        symbol: The option or stock symbol to trade (e.g., "SPY", "AAPL220916C150")
-        quantity: Number of contracts/shares to trade
         action: Trade direction - "Buy to Open" to open a new position or "Sell to Close" to close existing position
+        quantity: Number of contracts/shares to trade
+        underlying_symbol: The underlying stock symbol (e.g., "SPY", "AAPL")
+        strike: For options only - strike price
+        option_type: For options only - "C" for calls, "P" for puts
+        expiration_date: For options only - expiration date in YYYY-MM-DD format
         execution_type: When to execute the trade:
             - "immediate": Execute as soon as market is open (default)
             - "once": Execute once at specified run_time
@@ -57,20 +64,40 @@ async def schedule_trade(
             except ValueError:
                 return "Invalid time format. Please use HH:MM format (e.g., '09:30')"
 
+        # Convert expiration_date string to datetime if provided
+        expiry_datetime = None
+        if expiration_date:
+            try:
+                expiry_datetime = datetime.strptime(expiration_date, "%Y-%m-%d")
+            except ValueError:
+                return "Invalid expiration date format. Please use YYYY-MM-DD format"
+
+        # Get instrument
+        instrument = await create_instrument(
+            symbol=underlying_symbol,
+            expiration_date=expiry_datetime,
+            option_type=option_type,
+            strike=strike
+        )
+        if instrument is None:
+            return f"Could not find instrument for symbol: {underlying_symbol}"
+
         # Create task and start execution
         task_id = str(uuid4())
         task = Task(
             task_id=task_id,
-            symbol=symbol,
+            instrument=instrument,
             quantity=quantity,
             action=action,
             dry_run=dry_run,
-            description=f"{action} {quantity} {symbol}",
+            description=f"{action} {quantity} {underlying_symbol}" + (
+                f" {option_type}{strike} exp {expiration_date}" if option_type else ""
+            ),
             schedule_type=execution_type,
             run_time=run_time
         )
         scheduled_tasks[task_id] = task
-        task._task = asyncio.create_task(task.execute())  # Store the task
+        task._task = asyncio.create_task(task.execute())
         return f"Task {task_id} scheduled successfully"
 
     except Exception as e:
@@ -169,13 +196,15 @@ async def get_open_positions() -> str:
             return "No open positions found."
 
         output = ["Current Positions:", ""]
-        output.append(f"{'Symbol':<15} {'Type':<10} {'Quantity':<10} {'Value':<15}")
-        output.append("-" * 50)
+        output.append(f"{'Symbol':<15} {'Type':<10} {'Quantity':<10} {'Mark Price':<12} {'Value':<15}")
+        output.append("-" * 65)
 
         for pos in positions:
+            # Calculate value using mark_price * quantity * multiplier
+            value = float(pos.mark_price or 0) * float(pos.quantity) * pos.multiplier
             output.append(
                 f"{pos.symbol:<15} {pos.instrument_type:<10} "
-                f"{pos.quantity:<10} ${pos.value:,.2f}"
+                f"{pos.quantity:<10} ${float(pos.mark_price or 0):,.2f} ${value:,.2f}"
             )
         return "\n".join(output)
     except Exception as e:
@@ -247,6 +276,9 @@ async def get_metrics(symbols: list[str]) -> str:
         Formatted string containing table of metrics or message if none found
     """
     try:
+        if not symbols:
+            return "No metrics found for the specified symbols."
+
         metrics_data = await metrics.a_get_market_metrics(session, symbols)
         if not metrics_data:
             return "No metrics found for the specified symbols."
@@ -256,16 +288,22 @@ async def get_metrics(symbols: list[str]) -> str:
         output.append("-" * 45)
 
         for m in metrics_data:
-            iv_rank = f"{float(m.implied_volatility_index_rank * 100):.1f}%" if m.implied_volatility_index_rank else "N/A"
-            iv_percentile = f"{float(m.implied_volatility_percentile * 100):.1f}%" if m.implied_volatility_percentile else "N/A"
-            beta = f"{float(m.beta):.2f}" if m.beta else "N/A"
+            # Safely convert values with proper error handling
+            try:
+                iv_rank = f"{float(m.implied_volatility_index_rank) * 100:.1f}%" if m.implied_volatility_index_rank else "N/A"
+                iv_percentile = f"{float(m.implied_volatility_percentile) * 100:.1f}%" if m.implied_volatility_percentile else "N/A"
+                beta = f"{float(m.beta):.2f}" if m.beta else "N/A"
+            except (ValueError, TypeError, AttributeError):
+                iv_rank = "N/A"
+                iv_percentile = "N/A"
+                beta = "N/A"
 
             output.append(
                 f"{m.symbol:<6} {iv_rank:<8} {iv_percentile:<8} "
                 f"{beta:<6} {m.liquidity_rating or 'N/A':<10}"
             )
 
-            if m.earnings:
+            if hasattr(m, 'earnings') and m.earnings:
                 output.append(f"  Next Earnings: {m.earnings.expected_report_date} ({m.earnings.time_of_day})")
 
         return "\n".join(output)
@@ -282,5 +320,5 @@ def main():
         mcp.run()
 
     except Exception as e:
-        logger.error(f"Error in main: {e}")
+        logger.error(f"Error in running server: {e}")
         sys.exit(1)

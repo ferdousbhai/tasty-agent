@@ -8,20 +8,19 @@ from .common import session
 
 logger = logging.getLogger(__name__)
 
-async def get_instrument_for_symbol(
+async def create_instrument(
     symbol: str,
     expiration_date: datetime | None = None,
     option_type: Literal["C", "P"] | None = None,
     strike: float | None = None,
 ) -> Option | Equity | None:
-    """Get the instrument object for a given symbol.
+    """Create an instrument object for a given symbol.
 
     Args:
         symbol: Underlying symbol (e.g., "SPY", "AAPL")
         expiration_date: Optional expiration date for options
         option_type: Optional option type ("C" for call, "P" for put)
         strike: Optional strike price
-        session: TastyTrade session
 
     Returns:
         Option or Equity instrument, or None if not found
@@ -36,14 +35,20 @@ async def get_instrument_for_symbol(
             logger.error("Must provide all option parameters (expiration_date, option_type, strike) or none")
             return None
 
-        # Get option chain
         try:
-            chain = NestedOptionChain.get_chain(session, symbol)
+            # Get option chain
+            chain: list[NestedOptionChain] = NestedOptionChain.get_chain(session, symbol)
+
+            if not chain:
+                logger.error(f"No option chain found for {symbol}")
+                return None
+
+            option_chain = chain[0]
 
             # Find matching expiration
             exp_date = expiration_date.date()
             expiration = next(
-                (exp for exp in chain.expirations 
+                (exp for exp in option_chain.expirations 
                 if exp.expiration_date == exp_date),
                 None
             )

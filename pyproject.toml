@@ -10,6 +10,9 @@ dependencies = [
     "mcp[cli]>=1.2.0",
     "tastytrade>=9.7",
     "exchange-calendars>=4.8",
+    "ipykernel>=6.29.5",
+    "pytest>=8.3.4",
+    "pytest-asyncio>=0.25.3",
 ]
 authors = [
     { name = "Ferdous", email = "ferdous@hey.com" }
