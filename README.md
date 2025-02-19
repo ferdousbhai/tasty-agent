@@ -4,8 +4,6 @@
 
 A Model Context Protocol server for interacting with TastyTrade brokerage accounts. This server enables Large Language Models to monitor portfolios, analyze positions, and execute trades through the TastyTrade platform.
 
-Please note that tasty-agent is currently in early development. The functionality and available tools are subject to change and expansion as development continues.
-
 ## Prerequisites
 
 - Python 3.12
@@ -31,7 +29,7 @@ uvx tasty-agent
 The server requires TastyTrade credentials. For security, these are set up via command line and stored in your system's keyring (Keychain on macOS, Windows Credential Manager on Windows, or similar secure storage on other platforms):
 
 ```bash
-tasty-agent setup
+uvx tasty-agent setup
 ```
 
 ### Tools
@@ -51,12 +49,12 @@ tasty-agent setup
 
 3. `get_open_positions`
    - Get all currently open positions
-   - Returns: Formatted table showing Symbol, Position Type, Quantity, and Current Value
+   - Returns: Formatted table showing Symbol, Position Type, Quantity, Mark Price, and Current Value
 
 4. `get_transaction_history`
    - Get transaction history
    - Input:
-     - `start_date` (string, optional): Start date in YYYY-MM-DD format
+     - `start_date` (string, optional): Start date in YYYY-MM-DD format. Defaults to last 90 days if not provided.
    - Returns: Formatted table showing Transaction Date, Transaction Type, Description, and Value
 
 #### Trade Management
@@ -96,7 +94,7 @@ tasty-agent setup
    - Get market metrics for specified symbols
    - Input:
      - `symbols` (string[]): List of stock symbols
-   - Returns: Formatted table showing IV Rank, IV Percentile, Beta, Liquidity Rating, and Next Earnings Date
+   - Returns: Formatted table showing IV Rank, IV Percentile, Beta, Liquidity Rating, and Next Earnings Date/Time (when available)
 
 2. `get_prices`
    - Get current bid and ask prices
@@ -119,7 +117,7 @@ Add this to your `claude_desktop_config.json`:
 }
 ```
 
-**Important**: The tasty-agent server runs as a background process managed by Claude Desktop. Scheduled trades will only execute while Claude Desktop is running. When Claude Desktop is closed, the server gracefully saves all scheduled tasks and resumes them when Claude Desktop is reopened. Tasks are stored securely in `~/.tasty_agent/scheduled_tasks.json`.
+**Important**: Scheduled trades will only execute while Claude Desktop is running. When Claude Desktop is closed, the server shuts down and trades are not executed.
 
 ## Debugging
 
@@ -156,16 +154,6 @@ For local development testing:
   }
 }
 ```
-
-## Security Notice
-
-This server handles sensitive financial information and can execute trades. Always:
-
-- Use secure credential storage
-- Review queued orders before execution
-- Use dry-run mode for testing
-- Monitor scheduled tasks regularly
-- Keep your Claude Desktop installation up to date
 
 ## License
 
