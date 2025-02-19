@@ -17,7 +17,7 @@ class Task(BaseModel):
     quantity: int
     action: Literal["Buy to Open", "Sell to Close"]
     instrument: Option | Equity
-    dry_run: bool = True
+    dry_run: bool = False
     description: str | None = None
     schedule_type: Literal["immediate", "once", "daily"] = "once"
     run_time: str | None = None

@@ -64,12 +64,15 @@ tasty-agent setup
 1. `schedule_trade`
    - Schedule a trade for execution
    - Inputs:
-     - `symbol` (string): Stock or option symbol
-     - `quantity` (integer): Number of shares/contracts
      - `action` (string): "Buy to Open" or "Sell to Close"
-     - `execution_type` (string): "immediate", "once", or "daily"
-     - `run_time` (string, optional): Time to execute in HH:MM format (24-hour), defaults to market open (09:30)
-     - `dry_run` (boolean): Simulate without executing
+     - `quantity` (integer): Number of shares/contracts
+     - `underlying_symbol` (string): The underlying stock symbol (e.g., "SPY", "AAPL")
+     - `strike` (float, optional): For options only - strike price
+     - `option_type` (string, optional): For options only - "C" for calls, "P" for puts
+     - `expiration_date` (string, optional): For options only - expiration date in YYYY-MM-DD format
+     - `execution_type` (string): "immediate", "once", or "daily" (default: "immediate")
+     - `run_time` (string, optional): Time to execute in HH:MM format (24-hour), required for "once" and "daily"
+     - `dry_run` (boolean): Simulate without executing (default: False)
    - Returns: Task ID and confirmation message
    - Notes:
      - Immediate trades during market hours execute right away

@@ -9,15 +9,18 @@ import matplotlib
 import matplotlib.pyplot as plt
 from datetime import date, timedelta, datetime
 
+from mcp.server.fastmcp import FastMCP
 from tastytrade import metrics
 
 from .auth_cli import auth
-from .common import mcp, session, account
+from .state import account_state
 from .task import Task, scheduled_tasks
 from .instrument import create_instrument
+from .prices import get_prices as get_prices_internal
 
 logger = logging.getLogger(__name__)
 
+mcp = FastMCP("TastyTrade")
 
 @mcp.tool()
 async def schedule_trade(
@@ -29,7 +32,7 @@ async def schedule_trade(
     expiration_date: str | None = None,
     execution_type: Literal["immediate", "once", "daily"] = "immediate",
     run_time: str | None = None,
-    dry_run: bool = True,
+    dry_run: bool = False,
 ) -> str:
     """Schedule a trade for execution.
 
@@ -45,7 +48,7 @@ async def schedule_trade(
             - "once": Execute once at specified run_time
             - "daily": Execute every day at specified run_time
         run_time: Time to execute trade in HH:MM 24-hour format (e.g., "09:30"). Required for "once" and "daily" execution_type.
-        dry_run: If True, simulate the trade without actually placing it (default is True)
+        dry_run: If True, simulate the trade without actually placing it (default is False).
 
     Returns:
         String containing task ID and confirmation message
@@ -155,28 +158,33 @@ def plot_nlv_history(
     Returns:
         Base64 encoded PNG image string of the portfolio value chart
     """
-    history = account.get_net_liquidating_value_history(session, time_back=time_back)
-    matplotlib.use("Agg")
+    try:
+        history = account_state.account.get_net_liquidating_value_history(
+            account_state.session, 
+            time_back=time_back
+        )
+        matplotlib.use("Agg")
+        fig, ax = plt.subplots(figsize=(10, 6))
+        ax.plot([n.time for n in history], [n.close for n in history], 'b-')
+        ax.set_title(f'Portfolio Value History (Past {time_back})')
+        ax.set_xlabel('Date')
+        ax.set_ylabel('Portfolio Value ($)')
+        ax.grid(True)
 
-    fig, ax = plt.subplots(figsize=(10, 6))
-    ax.plot([n.time for n in history], [n.close for n in history], 'b-')
-    ax.set_title(f'Portfolio Value History (Past {time_back})')
-    ax.set_xlabel('Date')
-    ax.set_ylabel('Portfolio Value ($)')
-    ax.grid(True)
-
-    buffer = io.BytesIO()
-    fig.savefig(buffer, format='png')
-    buffer.seek(0)
-    base64_str = base64.b64encode(buffer.read()).decode('utf-8')
-    plt.close(fig)
-    return base64_str
+        buffer = io.BytesIO()
+        fig.savefig(buffer, format='png')
+        buffer.seek(0)
+        base64_str = base64.b64encode(buffer.read()).decode('utf-8')
+        plt.close(fig)
+        return base64_str
+    except Exception as e:
+        return f"Error generating plot: {str(e)}"
 
 @mcp.tool()
 async def get_account_balances() -> str:
     """Get current account balances and buying power information."""
     try:
-        balances = await account.a_get_balances(session)
+        balances = await account_state.get_balances()
         return (
             f"Account Balances:\n"
             f"Cash Balance: ${balances.cash_balance:,.2f}\n"
@@ -191,7 +199,7 @@ async def get_account_balances() -> str:
 async def get_open_positions() -> str:
     """Get all currently open positions in the trading account."""
     try:
-        positions = await account.a_get_positions(session)
+        positions = await account_state.get_positions()
         if not positions:
             return "No open positions found."
 
@@ -237,7 +245,7 @@ def get_transaction_history(start_date: str | None = None) -> str:
             except ValueError:
                 return "Invalid date format. Please use YYYY-MM-DD (e.g., '2024-01-01')"
 
-        transactions = account.get_history(session, start_date=date_obj)
+        transactions = account_state.account.get_history(account_state.session, start_date=date_obj)
         if not transactions:
             return "No transactions found for the specified period."
 
@@ -276,10 +284,7 @@ async def get_metrics(symbols: list[str]) -> str:
         Formatted string containing table of metrics or message if none found
     """
     try:
-        if not symbols:
-            return "No metrics found for the specified symbols."
-
-        metrics_data = await metrics.a_get_market_metrics(session, symbols)
+        metrics_data = await metrics.a_get_market_metrics(account_state.session, symbols)
         if not metrics_data:
             return "No metrics found for the specified symbols."
 
@@ -288,15 +293,10 @@ async def get_metrics(symbols: list[str]) -> str:
         output.append("-" * 45)
 
         for m in metrics_data:
-            # Safely convert values with proper error handling
-            try:
-                iv_rank = f"{float(m.implied_volatility_index_rank) * 100:.1f}%" if m.implied_volatility_index_rank else "N/A"
-                iv_percentile = f"{float(m.implied_volatility_percentile) * 100:.1f}%" if m.implied_volatility_percentile else "N/A"
-                beta = f"{float(m.beta):.2f}" if m.beta else "N/A"
-            except (ValueError, TypeError, AttributeError):
-                iv_rank = "N/A"
-                iv_percentile = "N/A"
-                beta = "N/A"
+            # Convert values with proper error handling
+            iv_rank = f"{float(m.implied_volatility_index_rank) * 100:.1f}%" if m.implied_volatility_index_rank else "N/A"
+            iv_percentile = f"{float(m.implied_volatility_percentile) * 100:.1f}%" if m.implied_volatility_percentile else "N/A"
+            beta = f"{float(m.beta):.2f}" if m.beta else "N/A"
 
             output.append(
                 f"{m.symbol:<6} {iv_rank:<8} {iv_percentile:<8} "
@@ -310,11 +310,41 @@ async def get_metrics(symbols: list[str]) -> str:
     except Exception as e:
         return f"Error fetching market metrics: {str(e)}"
 
+@mcp.tool()
+async def get_prices(
+    underlying_symbol: str,
+    expiration_date: str | None = None,
+    option_type: Literal["C", "P"] | None = None,
+    strike: float | None = None,
+) -> str:
+    """Get current bid/ask prices for a stock or option. Note that scheduled trades will execute at the market price, not the price returned by this tool.
+
+    Args:
+        underlying_symbol: Underlying symbol (e.g., "SPY", "AAPL")
+        expiration_date: Optional expiration date in YYYY-MM-DD format for options
+        option_type: Optional option type ("C" for call, "P" for put)
+        strike: Optional strike price
+
+    Returns:
+        String containing bid and ask prices
+    """
+    result = await get_prices_internal(underlying_symbol, expiration_date, option_type, strike)
+    if isinstance(result, tuple):
+        bid, ask = result
+        return (
+            f"Current prices for {underlying_symbol}:\n"
+            f"Bid: ${float(bid):.2f}\n"
+            f"Ask: ${float(ask):.2f}"
+        )
+    return result
 
 def main():
     try:
         if len(sys.argv) > 1 and sys.argv[1] == "setup":
             sys.exit(0 if auth() else 1)
+
+        # Initialize account state
+        _ = account_state.session  # This will trigger session creation
 
         logger.info("Server is running")
         mcp.run()

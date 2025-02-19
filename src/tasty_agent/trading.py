@@ -13,8 +13,8 @@ from tastytrade.order import (
 )
 from tastytrade.instruments import Option, Equity
 
-from .common import session, account
-from .market_data import get_prices
+from .state import account_state
+from .prices import get_prices
 
 # Maximum percentage of net liquidating value for any single position
 MAX_POSITION_SIZE_PCT = 0.40  # 40%
@@ -26,14 +26,16 @@ async def place_trade(
     instrument: Option | Equity,
     quantity: int,
     action: Literal["Buy to Open", "Sell to Close"],
-    dry_run: bool = True
+    dry_run: bool = False
 ) -> str:
     """Place a trade for the given instrument"""
     try:
         # Get current price
         try:
-            bid, ask = await get_prices(session, instrument)
-            bid, ask = Decimal(bid), Decimal(ask)
+            result = await get_prices(instrument.symbol)
+            if isinstance(result, str):
+                return result
+            bid, ask = result
             price = float(ask if action == "Buy to Open" else bid)
         except Exception as e:
             error_msg = f"Failed to get price for {instrument.symbol}: {str(e)}"
@@ -42,7 +44,7 @@ async def place_trade(
 
         if action == "Buy to Open":
             multiplier = instrument.multiplier if hasattr(instrument, 'multiplier') else 1
-            balances = await account.a_get_balances(session)
+            balances = await account_state.get_balances()
             order_value = Decimal(str(price)) * Decimal(str(quantity)) * Decimal(str(multiplier))
 
             # Use the appropriate buying power based on instrument type
@@ -74,14 +76,14 @@ async def place_trade(
                     return error_msg
 
         else:  # Sell to Close
-            positions = await account.a_get_positions(session)
+            positions = await account_state.get_positions()
             position = next((p for p in positions if p.symbol == instrument.symbol), None)
             if not position:
                 error_msg = f"No open position found for {instrument.symbol}"
                 logger.error(error_msg)
                 return f"Error: No open position found for {instrument.symbol}"
 
-            orders = account.get_live_orders(session)
+            orders = account_state.get_live_orders()
             pending_sell_quantity = sum(
                 sum(leg.quantity for leg in order.legs)
                 for order in orders
@@ -98,7 +100,7 @@ async def place_trade(
 
             if available_quantity <= 0:
                 error_msg = (f"Cannot place order - entire position of {position.quantity} "
-                           f"already has pending sell orders")
+                             f"already has pending sell orders")
                 logger.error(error_msg)
                 return f"Error: {error_msg}"
 
@@ -127,7 +129,7 @@ async def place_trade(
             price=Decimal(str(price)) * (-1 if action == "Buy to Open" else 1)
         )
 
-        response = account.place_order(session, initial_order, dry_run=dry_run)
+        response = account_state.place_order(initial_order, dry_run=dry_run)
         if response.errors:
             error_msg = "Order failed with errors:\n" + "\n".join(str(error) for error in response.errors)
             logger.error(error_msg)
@@ -144,7 +146,7 @@ async def place_trade(
         for attempt in range(20):
             await asyncio.sleep(15.0)
 
-            orders = account.get_live_orders(session)
+            orders = account_state.get_live_orders()
             order = next((o for o in orders if o.id == current_order.id), None)
 
             if not order:
@@ -155,6 +157,8 @@ async def place_trade(
             if order.status == OrderStatus.FILLED:
                 success_msg = "Order filled successfully"
                 logger.info(success_msg)
+                account_state.invalidate_positions()
+                account_state.invalidate_balances()
                 return success_msg
 
             if order.status not in (OrderStatus.LIVE, OrderStatus.RECEIVED):
@@ -175,7 +179,7 @@ async def place_trade(
                 price=Decimal(str(new_price)) * (-1 if action == "Buy to Open" else 1)
             )
 
-            response = account.replace_order(session, order.id, new_order)
+            response = account_state.replace_order(order.id, new_order)
             if response.errors:
                 error_msg = f"Failed to adjust order: {response.errors}"
                 logger.error(error_msg)

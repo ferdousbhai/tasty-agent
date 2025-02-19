@@ -65,5 +65,4 @@ def auth():
             except keyring.errors.PasswordDeleteError:
                 pass
         return False
-
     return True
