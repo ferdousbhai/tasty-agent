@@ -5,6 +5,7 @@ from uuid import uuid4
 import sys
 from datetime import timedelta, datetime, date
 
+from tabulate import tabulate
 from mcp.server.fastmcp import FastMCP
 from tastytrade import metrics
 
@@ -168,17 +169,21 @@ async def get_open_positions() -> str:
         if not positions:
             return "No open positions found."
 
-        output = ["Current Positions:", ""]
-        output.append(f"{'Symbol':<15} {'Type':<10} {'Quantity':<10} {'Mark Price':<12} {'Value':<15}")
-        output.append("-" * 65)
+        headers = ["Symbol", "Type", "Quantity", "Mark Price", "Value"]
+        table_data = []
 
         for pos in positions:
-            # Calculate value using mark_price * quantity * multiplier
             value = float(pos.mark_price or 0) * float(pos.quantity) * pos.multiplier
-            output.append(
-                f"{pos.symbol:<15} {pos.instrument_type:<10} "
-                f"{pos.quantity:<10} ${float(pos.mark_price or 0):,.2f} ${value:,.2f}"
-            )
+            table_data.append([
+                pos.symbol,
+                pos.instrument_type,
+                pos.quantity,
+                f"${float(pos.mark_price or 0):,.2f}",
+                f"${value:,.2f}"
+            ])
+
+        output = ["Current Positions:", ""]
+        output.append(tabulate(table_data, headers=headers, tablefmt="grid"))
         return "\n".join(output)
     except Exception as e:
         return f"Error fetching positions: {str(e)}"
@@ -214,19 +219,19 @@ def get_transaction_history(start_date: str | None = None) -> str:
         if not transactions:
             return "No transactions found for the specified period."
 
-        output = ["Transaction History:", ""]
-        output.append(f"{'Date':<12} {'Sub Type':<15} {'Description':<45} {'Value':<15}")
-        output.append("-" * 90)
+        headers = ["Date", "Sub Type", "Description", "Value"]
+        table_data = []
 
         for txn in transactions:
-            date_str = txn.transaction_date.strftime("%Y-%m-%d")
-            sub_type = txn.transaction_sub_type or 'N/A'
-            description = txn.description or 'N/A'
-            value = f"${float(txn.net_value):,.2f}" if txn.net_value is not None else 'N/A'
+            table_data.append([
+                txn.transaction_date.strftime("%Y-%m-%d"),
+                txn.transaction_sub_type or 'N/A',
+                txn.description or 'N/A',
+                f"${float(txn.net_value):,.2f}" if txn.net_value is not None else 'N/A'
+            ])
 
-            output.append(
-                f"{date_str:<12} {sub_type:<15} {description:<45} {value:<15}"
-            )
+        output = ["Transaction History:", ""]
+        output.append(tabulate(table_data, headers=headers, tablefmt="grid"))
         return "\n".join(output)
     except Exception as e:
         return f"Error fetching transactions: {str(e)}"
@@ -243,6 +248,7 @@ async def get_metrics(symbols: list[str]) -> str:
     - IV %ile: Implied volatility percentile
     - Beta: Stock's beta value
     - Liquidity: Liquidity rating
+    - Borrow Rate: Stock borrow rate if available
     - Next Earnings: Expected earnings date and time if available
 
     Returns:
@@ -253,24 +259,36 @@ async def get_metrics(symbols: list[str]) -> str:
         if not metrics_data:
             return "No metrics found for the specified symbols."
 
-        output = ["Market Metrics:", ""]
-        output.append(f"{'Symbol':<6} {'IV Rank':<8} {'IV %ile':<8} {'Beta':<6} {'Liquidity':<10}")
-        output.append("-" * 45)
+        # Prepare data for tabulate
+        headers = ["Symbol", "IV Rank", "IV %ile", "Beta", "Liquidity", "Borrow Rate"]
+        table_data = []
 
         for m in metrics_data:
             # Convert values with proper error handling
             iv_rank = f"{float(m.implied_volatility_index_rank) * 100:.1f}%" if m.implied_volatility_index_rank else "N/A"
             iv_percentile = f"{float(m.implied_volatility_percentile) * 100:.1f}%" if m.implied_volatility_percentile else "N/A"
             beta = f"{float(m.beta):.2f}" if m.beta else "N/A"
+            borrow_rate = f"{float(m.borrow_rate):.2f}%" if hasattr(m, 'borrow_rate') and m.borrow_rate else "N/A"
 
-            output.append(
-                f"{m.symbol:<6} {iv_rank:<8} {iv_percentile:<8} "
-                f"{beta:<6} {m.liquidity_rating or 'N/A':<10}"
-            )
+            row = [
+                m.symbol,
+                iv_rank,
+                iv_percentile,
+                beta,
+                m.liquidity_rating or "N/A",
+                borrow_rate
+            ]
+            table_data.append(row)
 
+            # Add earnings info as a separate row if available
             if hasattr(m, 'earnings') and m.earnings:
-                output.append(f"  Next Earnings: {m.earnings.expected_report_date} ({m.earnings.time_of_day})")
+                table_data.append([
+                    f"↳ Next Earnings: {m.earnings.expected_report_date} ({m.earnings.time_of_day})",
+                    "", "", "", "", ""
+                ])
 
+        output = ["Market Metrics:", ""]
+        output.append(tabulate(table_data, headers=headers, tablefmt="grid"))
         return "\n".join(output)
     except Exception as e:
         return f"Error fetching market metrics: {str(e)}"
