@@ -16,10 +16,7 @@ from tastytrade.instruments import Option, Equity
 from .state import account_state
 from .prices import get_prices
 
-# Maximum percentage of net liquidating value for any single position
-MAX_POSITION_SIZE_PCT = 0.40  # 40%
 
-# Add logger configuration at the top of the file after imports
 logger = logging.getLogger(__name__)
 
 async def place_trade(
@@ -54,24 +51,14 @@ async def place_trade(
                 else balances.equity_buying_power
             )
 
-            max_value = min(
-                buying_power,
-                balances.net_liquidating_value * Decimal(str(MAX_POSITION_SIZE_PCT))
-            )
-
-            logger.info(
-                f"Order value: ${order_value:,.2f}, Max allowed: ${max_value:,.2f}, "
-                f"Using {'derivative' if isinstance(instrument, Option) else 'equity'} buying power"
-            )
-
-            if order_value > max_value:
+            if order_value > buying_power:
                 original_quantity = quantity
-                quantity = int(max_value / (Decimal(str(price)) * Decimal(str(multiplier))))
+                quantity = int(buying_power / (Decimal(str(price)) * Decimal(str(multiplier))))
                 logger.warning(
-                    f"Reduced order quantity from {original_quantity} to {quantity} due to position limits"
+                    f"Reduced order quantity from {original_quantity} to {quantity} due to buying power limits"
                 )
                 if quantity <= 0:
-                    error_msg = "Order rejected: Exceeds available funds or position size limits"
+                    error_msg = "Order rejected: Exceeds available funds"
                     logger.error(error_msg)
                     return error_msg
 
@@ -99,8 +86,10 @@ async def place_trade(
             )
 
             if available_quantity <= 0:
-                error_msg = (f"Cannot place order - entire position of {position.quantity} "
-                             f"already has pending sell orders")
+                error_msg = (
+                    f"Cannot place order - entire position of {position.quantity} "
+                    f"already has pending sell orders"
+                )
                 logger.error(error_msg)
                 return f"Error: {error_msg}"
 
@@ -194,36 +183,3 @@ async def place_trade(
     except Exception as e:
         logger.exception("Error placing trade")
         return f"Error placing trade: {str(e)}"
-
-async def test_place_trade():
-    """Test the place_trade function with a dry run"""
-    from .instrument import create_instrument
-
-    # Create a test equity instrument - add await here
-    test_stock = await create_instrument("AAPL")
-    if not test_stock:
-        print("Failed to create test instrument")
-        return
-
-    # Test a buy order
-    print("\nTesting Buy to Open:")
-    result = await place_trade(
-        instrument=test_stock,
-        quantity=10,
-        action="Buy to Open",
-        dry_run=True
-    )
-    print(f"Result: {result}")
-
-    # Test a sell order
-    print("\nTesting Sell to Close:")
-    result = await place_trade(
-        instrument=test_stock,
-        quantity=5,
-        action="Sell to Close",
-        dry_run=True
-    )
-    print(f"Result: {result}")
-
-if __name__ == "__main__":
-    asyncio.run(test_place_trade())

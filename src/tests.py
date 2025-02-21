@@ -8,7 +8,6 @@ from uuid import UUID
 from typing import AsyncGenerator
 import pytest
 import pytest_asyncio
-import exchange_calendars as xcals
 from .tasty_agent.server import (
     schedule_trade,
     list_scheduled_trades,
@@ -68,32 +67,32 @@ def reset_global_state():
 
 class TestTradeScheduling:
     @pytest.mark.asyncio
-    async def test_schedule_stock_trade(self) -> None:
-        """Test scheduling a stock trade."""
-        result = await schedule_trade(
-            action="Buy to Open",
-            quantity=1,
-            underlying_symbol="SPY",
-            dry_run=True
-        )
+    @pytest.mark.parametrize("trade_params", [
+        {
+            "action": "Buy to Open",
+            "quantity": 1,
+            "underlying_symbol": "SPY",
+            "dry_run": True
+        },
+        {
+            "action": "Buy to Open",
+            "quantity": 1,
+            "underlying_symbol": "SPY",
+            "strike": 400,
+            "option_type": "P",
+            "expiration_date": None,  # Will be set in the test
+            "dry_run": True
+        }
+    ])
+    async def test_schedule_trade(self, trade_params: dict) -> None:
+        """Test scheduling stock and option trades."""
+        if "expiration_date" in trade_params and trade_params["expiration_date"] is None:
+            trade_params["expiration_date"] = get_expiration_date()
+
+        result = await schedule_trade(**trade_params)
         assert "scheduled successfully" in result.lower()
         task_id = result.split()[1]
         assert UUID(task_id)  # Verify task_id is a valid UUID
-
-    @pytest.mark.asyncio
-    async def test_schedule_option_trade(self) -> None:
-        """Test scheduling an option trade."""
-        expiration_str = get_expiration_date()
-        result = await schedule_trade(
-            action="Buy to Open",
-            quantity=1,
-            underlying_symbol="SPY",
-            strike=400,
-            option_type="P",
-            expiration_date=expiration_str,
-            dry_run=True
-        )
-        assert "scheduled successfully" in result.lower()
 
 # Test list_scheduled_trades
 @pytest.mark.asyncio
@@ -175,145 +174,57 @@ class TestMetrics:
             # Clean up
             loop.close()
 
-@pytest.mark.asyncio
-async def test_schedule_trade_invalid_time() -> None:
-    """Test scheduling a trade with invalid time format."""
-    result = await schedule_trade(
-        action="Buy to Open",
-        quantity=1,
-        underlying_symbol="SPY",
-        execution_type="once",
-        run_time="25:00",  # Invalid time
-        dry_run=True
-    )
-    assert "invalid time format" in result.lower()
-
-@pytest.mark.asyncio
-async def test_schedule_trade_missing_runtime() -> None:
-    """Test scheduling a trade without required run_time."""
-    result = await schedule_trade(
-        action="Buy to Open",
-        quantity=1,
-        underlying_symbol="SPY",
-        execution_type="once",  # Requires run_time
-        dry_run=True
-    )
-    assert "run_time parameter is required" in result.lower()
-
-# Add new test class for get_prices
 class TestPrices:
     @pytest.mark.asyncio
-    async def test_get_stock_prices(self) -> None:
-        """Test getting prices for a stock."""
-        result = await get_prices(underlying_symbol="SPY")
-        assert "Current prices for SPY" in result
-        assert "Bid: $" in result
-        assert "Ask: $" in result
-
-    @pytest.mark.asyncio
-    async def test_get_option_prices(self) -> None:
-        """Test getting prices for an option."""
-        expiration_str = get_expiration_date()
-        result = await get_prices(
-            underlying_symbol="SPY",
-            expiration_date=expiration_str,
-            option_type="P",
-            strike=400
+    @pytest.mark.parametrize("test_params,expected_msg", [
+        (
+            {"underlying_symbol": "SPY"},
+            "Current prices for SPY"
+        ),
+        (
+            {
+                "underlying_symbol": "SPY",
+                "expiration_date": None,  # Will be set in test
+                "option_type": "P",
+                "strike": 400
+            },
+            "Current prices for"
+        ),
+        (
+            {"underlying_symbol": "INVALID"},
+            "Could not find instrument"
+        ),
+        (
+            {
+                "underlying_symbol": "SPY",
+                "expiration_date": "invalid-date",
+                "option_type": "P",
+                "strike": 400
+            },
+            "Invalid expiration date format"
+        ),
+        (
+            {
+                "underlying_symbol": "SPY",
+                "option_type": "P"
+            },
+            "Could not find instrument"
         )
-        assert "Current prices for" in result
-        assert "Bid: $" in result
-        assert "Ask: $" in result
+    ])
+    async def test_get_prices(self, test_params: dict, expected_msg: str) -> None:
+        """Test getting prices for various scenarios."""
+        if "expiration_date" in test_params and test_params["expiration_date"] is None:
+            test_params["expiration_date"] = get_expiration_date()
 
-    @pytest.mark.asyncio
-    async def test_get_prices_invalid_symbol(self) -> None:
-        """Test getting prices for an invalid symbol."""
-        result = await get_prices(underlying_symbol="INVALID")
-        assert "Could not find instrument" in result
-
-    @pytest.mark.asyncio
-    async def test_get_prices_invalid_date(self) -> None:
-        """Test getting prices with invalid date format."""
-        result = await get_prices(
-            underlying_symbol="SPY",
-            expiration_date="invalid-date",
-            option_type="P",
-            strike=400
-        )
-        assert "Invalid expiration date format" in result
-
-    @pytest.mark.asyncio
-    async def test_get_prices_missing_option_params(self) -> None:
-        """Test getting prices with incomplete option parameters."""
-        result = await get_prices(
-            underlying_symbol="SPY",
-            option_type="P",
-        )
-        assert "Could not find instrument" in result
-
-class TestExpirationDate:
-    def test_get_expiration_date_default(self) -> None:
-        """Test getting default expiration date (90+ days out)."""
-        today = date.today()
-        expiry = get_expiration_date()
-        expiry_date = datetime.strptime(expiry, "%Y-%m-%d").date()
-
-        # Verify it's a Friday
-        assert expiry_date.weekday() == 4
-
-        # Verify it's at least 90 days out
-        days_out = (expiry_date - today).days
-        assert days_out >= 90
-
-        # Verify it's the third Friday
-        month_start = expiry_date.replace(day=1)
-        friday_count = sum(1 for i in range(expiry_date.day) if (month_start + timedelta(days=i)).weekday() == 4)
-        assert friday_count == 3
-
-    def test_get_expiration_date_with_target(self) -> None:
-        """Test getting expiration date after specific target date."""
-        target = (date.today() + timedelta(days=45)).strftime("%Y-%m-%d")
-        expiry = get_expiration_date(target)
-        expiry_date = datetime.strptime(expiry, "%Y-%m-%d").date()
-        target_date = datetime.strptime(target, "%Y-%m-%d").date()
-
-        # Verify it's after target date
-        assert expiry_date > target_date
-
-        # Verify it's a monthly expiration (third Friday)
-        assert expiry_date.weekday() == 4
-        month_start = expiry_date.replace(day=1)
-        friday_count = sum(1 for i in range(expiry_date.day) if (month_start + timedelta(days=i)).weekday() == 4)
-        assert friday_count == 3
-
-    def test_get_expiration_date_invalid_format(self) -> None:
-        """Test with invalid date format."""
-        result = get_expiration_date("2024/01/01")
-        assert "Invalid date format" in result
-
+        result = await get_prices(**test_params)
+        assert expected_msg in result
+        # Only check for bid/ask if we expect a successful price lookup
+        if expected_msg.startswith("Current prices for"):
+            assert "Bid: $" in result
+            assert "Ask: $" in result
 
 def get_expiration_date(target_date: str | None = None) -> str:
-    """Get the next monthly option expiration date after the target date.
-    If no target date is provided, returns the first monthly expiration ≥90 days out.
-    """
-    # Get CBOE calendar
-    cboe = xcals.get_calendar("XCBOE")
-    try:
-        search_date = (datetime.strptime(target_date, "%Y-%m-%d").date() if target_date else date.today() + timedelta(days=90))
-        # Start from first day of month and find third Friday
-        current = search_date.replace(day=1)
-        while current.weekday() != 4:  # Move to first Friday
-            current += timedelta(days=1)
-        current += timedelta(weeks=2)  # Move to third Friday
-
-        # Move to next month if needed
-        if current < search_date:
-            current = (current + timedelta(days=32)).replace(day=1)
-            while current.weekday() != 4:
-                current += timedelta(days=1)
-            current += timedelta(weeks=2)
-
-        # Get previous trading day if not a valid session
-        return cboe.date_to_session(current, direction="previous").strftime("%Y-%m-%d")
-
-    except ValueError:
-        return "Invalid date format. Please use YYYY-MM-DD format"
+    """Helper function to get a valid expiration date for testing."""
+    if target_date:
+        return target_date
+    return (date.today() + timedelta(days=90)).strftime("%Y-%m-%d")

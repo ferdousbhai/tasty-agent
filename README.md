@@ -68,15 +68,11 @@ uvx tasty-agent setup
      - `strike` (float, optional): For options only - strike price
      - `option_type` (string, optional): For options only - "C" for calls, "P" for puts
      - `expiration_date` (string, optional): For options only - expiration date in YYYY-MM-DD format
-     - `execution_type` (string): "immediate", "once", or "daily" (default: "immediate")
-     - `run_time` (string, optional): Time to execute in HH:MM format (24-hour), required for "once" and "daily"
      - `dry_run` (boolean): Simulate without executing (default: False)
    - Returns: Task ID and confirmation message
    - Notes:
-     - Immediate trades during market hours execute right away
-     - Immediate trades during market closure are scheduled for next market open
-     - Daily trades repeat every market day at the specified time
-     - One-time trades execute once at the specified time
+     - Trades execute immediately during market hours
+     - Trades during market closure are automatically scheduled for next market open
 
 2. `list_scheduled_trades`
    - List all scheduled trades

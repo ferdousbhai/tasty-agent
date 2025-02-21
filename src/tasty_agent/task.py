@@ -1,14 +1,13 @@
 import logging
-from typing import Literal
 import asyncio
+from typing import Literal
 
 from pydantic import BaseModel
 from tastytrade.instruments import Option, Equity
 
 from .trading import place_trade
-from ..utils import is_market_open, get_time_until_market_open
+from ..utils import is_market_open, get_time_until_market_open, format_time_delta
 
-# Add logger configuration
 logger = logging.getLogger(__name__)
 
 class Task(BaseModel):
@@ -19,9 +18,14 @@ class Task(BaseModel):
     instrument: Option | Equity
     dry_run: bool = False
     description: str | None = None
-    schedule_type: Literal["immediate", "once", "daily"] = "once"
-    run_time: str | None = None
     _task: asyncio.Task | None = None
+
+    def get_execution_time_info(self) -> str:
+        """Get information about when the task will execute"""
+        if is_market_open():
+            return "the trade will execute immediately"
+        time_until = get_time_until_market_open()
+        return f"the trade will execute when market opens: in {format_time_delta(time_until)}"
 
     async def execute(self):
         """Execute the task"""

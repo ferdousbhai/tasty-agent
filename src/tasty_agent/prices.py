@@ -36,7 +36,7 @@ async def get_prices(
 
         # Get instrument
         instrument = await create_instrument(
-            symbol=underlying_symbol,
+            underlying_symbol=underlying_symbol,
             expiration_date=expiry_datetime,
             option_type=option_type,
             strike=strike

@@ -24,3 +24,19 @@ def is_market_open() -> bool:
     nyse = get_calendar('XNYS')  # NYSE calendar
     current_time = datetime.datetime.now(ZoneInfo('America/New_York'))
     return nyse.is_open_on_minute(current_time)
+
+
+def format_time_delta(delta) -> str:
+    """Format a timedelta into a human-readable string"""
+    days = delta.days
+    hours = delta.seconds // 3600
+    minutes = (delta.seconds % 3600) // 60
+
+    parts = []
+    if days > 0:
+        parts.append(f"{days}d")
+    if hours > 0:
+        parts.append(f"{hours}h")
+    if minutes > 0:
+        parts.append(f"{minutes}m")
+    return " ".join(parts) if parts else "less than 1m"

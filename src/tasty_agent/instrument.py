@@ -9,7 +9,7 @@ from .state import account_state
 logger = logging.getLogger(__name__)
 
 async def create_instrument(
-    symbol: str,
+    underlying_symbol: str,
     expiration_date: datetime | None = None,
     option_type: Literal["C", "P"] | None = None,
     strike: float | None = None,
@@ -17,7 +17,7 @@ async def create_instrument(
     """Create an instrument object for a given symbol.
 
     Args:
-        symbol: Underlying symbol (e.g., "SPY", "AAPL")
+        underlying_symbol: Underlying symbol (e.g., "SPY", "AAPL")
         expiration_date: Optional expiration date for options
         option_type: Optional option type ("C" for call, "P" for put)
         strike: Optional strike price
@@ -28,7 +28,7 @@ async def create_instrument(
     try:
         # If no option parameters, treat as equity
         if not any([expiration_date, option_type, strike]):
-            return Equity.get_equity(account_state.session, symbol)
+            return Equity.get_equity(account_state.session, underlying_symbol)
 
         # Validate all option parameters are present
         if not all([expiration_date, option_type, strike]):
@@ -37,10 +37,10 @@ async def create_instrument(
 
         try:
             # Get option chain
-            chain: list[NestedOptionChain] = NestedOptionChain.get_chain(account_state.session, symbol)
+            chain: list[NestedOptionChain] = NestedOptionChain.get_chain(account_state.session, underlying_symbol)
 
             if not chain:
-                logger.error(f"No option chain found for {symbol}")
+                logger.error(f"No option chain found for {underlying_symbol}")
                 return None
 
             option_chain = chain[0]
@@ -75,5 +75,5 @@ async def create_instrument(
             return None
 
     except Exception as e:
-        logger.error(f"Error getting instrument for {symbol}: {e}")
+        logger.error(f"Error getting instrument for {underlying_symbol}: {e}")
         return None

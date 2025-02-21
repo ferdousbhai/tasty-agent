@@ -3,11 +3,7 @@ from typing import Literal
 import logging
 from uuid import uuid4
 import sys
-import io
-import base64
-import matplotlib
-import matplotlib.pyplot as plt
-from datetime import date, timedelta, datetime
+from datetime import timedelta, datetime, date
 
 from mcp.server.fastmcp import FastMCP
 from tastytrade import metrics
@@ -30,8 +26,6 @@ async def schedule_trade(
     strike: float | None = None,
     option_type: Literal["C", "P"] | None = None,
     expiration_date: str | None = None,
-    execution_type: Literal["immediate", "once", "daily"] = "immediate",
-    run_time: str | None = None,
     dry_run: bool = False,
 ) -> str:
     """Schedule a trade for execution.
@@ -43,31 +37,12 @@ async def schedule_trade(
         strike: For options only - strike price
         option_type: For options only - "C" for calls, "P" for puts
         expiration_date: For options only - expiration date in YYYY-MM-DD format
-        execution_type: When to execute the trade:
-            - "immediate": Execute as soon as market is open (default)
-            - "once": Execute once at specified run_time
-            - "daily": Execute every day at specified run_time
-        run_time: Time to execute trade in HH:MM 24-hour format (e.g., "09:30"). Required for "once" and "daily" execution_type.
         dry_run: If True, simulate the trade without actually placing it (default is False).
 
     Returns:
         String containing task ID and confirmation message
     """
     try:
-        # Validate run_time is provided when required
-        if execution_type in ["once", "daily"] and not run_time:
-            return "run_time parameter is required for 'once' and 'daily' execution types"
-
-        # Validate run_time format if provided
-        if run_time:
-            try:
-                hour, minute = map(int, run_time.split(":"))
-                if not (0 <= hour <= 23 and 0 <= minute <= 59):
-                    return "Invalid time format. Please use HH:MM in 24-hour format"
-            except ValueError:
-                return "Invalid time format. Please use HH:MM format (e.g., '09:30')"
-
-        # Convert expiration_date string to datetime if provided
         expiry_datetime = None
         if expiration_date:
             try:
@@ -75,9 +50,8 @@ async def schedule_trade(
             except ValueError:
                 return "Invalid expiration date format. Please use YYYY-MM-DD format"
 
-        # Get instrument
         instrument = await create_instrument(
-            symbol=underlying_symbol,
+            underlying_symbol=underlying_symbol,
             expiration_date=expiry_datetime,
             option_type=option_type,
             strike=strike
@@ -85,7 +59,6 @@ async def schedule_trade(
         if instrument is None:
             return f"Could not find instrument for symbol: {underlying_symbol}"
 
-        # Create task and start execution
         task_id = str(uuid4())
         task = Task(
             task_id=task_id,
@@ -95,13 +68,13 @@ async def schedule_trade(
             dry_run=dry_run,
             description=f"{action} {quantity} {underlying_symbol}" + (
                 f" {option_type}{strike} exp {expiration_date}" if option_type else ""
-            ),
-            schedule_type=execution_type,
-            run_time=run_time
+            )
         )
         scheduled_tasks[task_id] = task
         task._task = asyncio.create_task(task.execute())
-        return f"Task {task_id} scheduled successfully"
+
+        timing_info = task.get_execution_time_info()
+        return f"Task {task_id} scheduled successfully - {timing_info}"
 
     except Exception as e:
         return f"Error scheduling trade: {str(e)}"
@@ -144,23 +117,15 @@ async def remove_scheduled_trade(task_id: str) -> str:
 def plot_nlv_history(
     time_back: Literal['1d', '1m', '3m', '6m', '1y', 'all'] = '1y'
 ) -> str:
-    """Plot the account's net liquidating value history and return as a base64 PNG image.
-
-    Args:
-        time_back: Time period to plot:
-            - '1d': Last day
-            - '1m': Last month
-            - '3m': Last 3 months
-            - '6m': Last 6 months
-            - '1y': Last year
-            - 'all': All available history
-
-    Returns:
-        Base64 encoded PNG image string of the portfolio value chart
-    """
+    """Plot the account's net liquidating value history and return as a base64 PNG image."""
     try:
+        import io
+        import base64
+        import matplotlib
+        import matplotlib.pyplot as plt
+
         history = account_state.account.get_net_liquidating_value_history(
-            account_state.session, 
+            account_state.session,
             time_back=time_back
         )
         matplotlib.use("Agg")
@@ -344,7 +309,7 @@ def main():
             sys.exit(0 if auth() else 1)
 
         # Initialize account state
-        _ = account_state.session  # This will trigger session creation
+        account_state.session
 
         logger.info("Server is running")
         mcp.run()
