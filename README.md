@@ -106,7 +106,7 @@ Add this to your `claude_desktop_config.json`:
 {
   "mcpServers": {
     "tastytrade": {
-      "command": "uvx",
+      "command": "path/to/uvx/command/uvx",
       "args": ["tasty-agent"]
     }
   }
@@ -139,7 +139,7 @@ For local development testing:
 {
   "mcpServers": {
     "tastytrade": {
-      "command": "uv",
+      "command": "path/to/uv/command/uv",
       "args": [
         "--directory",
         "path/to/tasty-agent",

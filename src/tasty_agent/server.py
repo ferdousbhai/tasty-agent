@@ -1,23 +1,28 @@
 import asyncio
-from typing import Literal
-import logging
-from uuid import uuid4
-import sys
 from datetime import timedelta, datetime, date
+import logging
+import sys
+from typing import Literal
+from uuid import uuid4
 
 from tabulate import tabulate
 from mcp.server.fastmcp import FastMCP
-from tastytrade import metrics
 
-from .auth_cli import auth
-from .state import account_state
-from .task import Task, scheduled_tasks
-from .instrument import create_instrument
-from .prices import get_prices as get_prices_internal
+from .tastytrade_api import TastytradeAPI
+from .task import Task
 
 logger = logging.getLogger(__name__)
 
+# Tastytrade API
+tastytrade_api = TastytradeAPI.get_instance()
+
+# Task Storage
+scheduled_tasks: dict[str, Task] = {}
+
+# MCP Server
 mcp = FastMCP("TastyTrade")
+
+# Tools
 
 @mcp.tool()
 async def schedule_trade(
@@ -31,17 +36,13 @@ async def schedule_trade(
 ) -> str:
     """Schedule a trade for execution.
 
-    Args:
-        action: Trade direction - "Buy to Open" to open a new position or "Sell to Close" to close existing position
-        quantity: Number of contracts/shares to trade
-        underlying_symbol: The underlying stock symbol (e.g., "SPY", "AAPL")
-        strike: For options only - strike price
-        option_type: For options only - "C" for calls, "P" for puts
-        expiration_date: For options only - expiration date in YYYY-MM-DD format
-        dry_run: If True, simulate the trade without actually placing it (default is False).
-
-    Returns:
-        String containing task ID and confirmation message
+    action: "Buy to Open" or "Sell to Close"
+    quantity: Number of contracts/shares
+    underlying_symbol: Stock symbol (e.g., "SPY", "AAPL")
+    strike: Strike price for options
+    option_type: "C" for calls, "P" for puts
+    expiration_date: YYYY-MM-DD format
+    dry_run: Simulate trade without placing it
     """
     try:
         expiry_datetime = None
@@ -51,7 +52,7 @@ async def schedule_trade(
             except ValueError:
                 return "Invalid expiration date format. Please use YYYY-MM-DD format"
 
-        instrument = await create_instrument(
+        instrument = await tastytrade_api.create_instrument(
             underlying_symbol=underlying_symbol,
             expiration_date=expiry_datetime,
             option_type=option_type,
@@ -118,17 +119,15 @@ async def remove_scheduled_trade(task_id: str) -> str:
 def plot_nlv_history(
     time_back: Literal['1d', '1m', '3m', '6m', '1y', 'all'] = '1y'
 ) -> str:
-    """Plot the account's net liquidating value history and return as a base64 PNG image."""
+    """Plot account's net liquidating value history as base64 PNG."""
     try:
         import io
         import base64
         import matplotlib
         import matplotlib.pyplot as plt
 
-        history = account_state.account.get_net_liquidating_value_history(
-            account_state.session,
-            time_back=time_back
-        )
+        history = tastytrade_api.get_nlv_history(time_back=time_back)
+
         matplotlib.use("Agg")
         fig, ax = plt.subplots(figsize=(10, 6))
         ax.plot([n.time for n in history], [n.close for n in history], 'b-')
@@ -148,9 +147,9 @@ def plot_nlv_history(
 
 @mcp.tool()
 async def get_account_balances() -> str:
-    """Get current account balances and buying power information."""
+    """Get current account balances and buying power."""
     try:
-        balances = await account_state.get_balances()
+        balances = await tastytrade_api.get_balances()
         return (
             f"Account Balances:\n"
             f"Cash Balance: ${balances.cash_balance:,.2f}\n"
@@ -165,7 +164,7 @@ async def get_account_balances() -> str:
 async def get_open_positions() -> str:
     """Get all currently open positions in the trading account."""
     try:
-        positions = await account_state.get_positions()
+        positions = await tastytrade_api.get_positions()
         if not positions:
             return "No open positions found."
 
@@ -183,27 +182,17 @@ async def get_open_positions() -> str:
             ])
 
         output = ["Current Positions:", ""]
-        output.append(tabulate(table_data, headers=headers, tablefmt="grid"))
+        output.append(tabulate(table_data, headers=headers, tablefmt="plain"))
         return "\n".join(output)
     except Exception as e:
         return f"Error fetching positions: {str(e)}"
 
 @mcp.tool()
 def get_transaction_history(start_date: str | None = None) -> str:
-    """Get detailed transaction history for the account.
+    """Get detailed transaction history.
 
-    Args:
-        start_date: Optional start date in YYYY-MM-DD format (e.g., '2024-01-01').
-        If not provided, returns last 90 days of transactions.
-
-    Returns a formatted table showing:
-    - Date: Transaction date
-    - Sub Type: Transaction category
-    - Description: Detailed transaction description
-    - Value: Transaction amount in USD
-
-    Returns:
-        Formatted string containing table of transactions or message if none found
+    start_date: YYYY-MM-DD format (e.g., '2024-01-01'). Last 90 days if not provided.
+    Shows: Date, Type, Description, Value in USD
     """
     try:
         # Default to 90 days if no date provided
@@ -215,7 +204,7 @@ def get_transaction_history(start_date: str | None = None) -> str:
             except ValueError:
                 return "Invalid date format. Please use YYYY-MM-DD (e.g., '2024-01-01')"
 
-        transactions = account_state.account.get_history(account_state.session, start_date=date_obj)
+        transactions = tastytrade_api.get_transaction_history(start_date=date_obj)
         if not transactions:
             return "No transactions found for the specified period."
 
@@ -231,36 +220,25 @@ def get_transaction_history(start_date: str | None = None) -> str:
             ])
 
         output = ["Transaction History:", ""]
-        output.append(tabulate(table_data, headers=headers, tablefmt="grid"))
+        output.append(tabulate(table_data, headers=headers, tablefmt="plain"))
         return "\n".join(output)
     except Exception as e:
         return f"Error fetching transactions: {str(e)}"
 
 @mcp.tool()
 async def get_metrics(symbols: list[str]) -> str:
-    """Get market metrics and analysis for specified stock symbols.
+    """Get market metrics for stock symbols.
 
-    Args:
-        symbols: List of stock symbols to analyze (e.g., ["SPY", "AAPL"])
-
-    Returns a formatted table showing for each symbol:
-    - IV Rank: Implied volatility rank as percentage
-    - IV %ile: Implied volatility percentile
-    - Beta: Stock's beta value
-    - Liquidity: Liquidity rating
-    - Borrow Rate: Stock borrow rate if available
-    - Next Earnings: Expected earnings date and time if available
-
-    Returns:
-        Formatted string containing table of metrics or message if none found
+    symbols: List of stock symbols (e.g., ["SPY", "AAPL"])
+    Shows: IV Rank/Percentile, Beta, Liquidity, Lendability, Earnings
     """
     try:
-        metrics_data = await metrics.a_get_market_metrics(account_state.session, symbols)
+        metrics_data = await tastytrade_api.get_market_metrics(symbols)
         if not metrics_data:
             return "No metrics found for the specified symbols."
 
         # Prepare data for tabulate
-        headers = ["Symbol", "IV Rank", "IV %ile", "Beta", "Liquidity", "Borrow Rate"]
+        headers = ["Symbol", "IV Rank", "IV %ile", "Beta", "Liquidity", "Lendability", "Earnings"]
         table_data = []
 
         for m in metrics_data:
@@ -268,7 +246,11 @@ async def get_metrics(symbols: list[str]) -> str:
             iv_rank = f"{float(m.implied_volatility_index_rank) * 100:.1f}%" if m.implied_volatility_index_rank else "N/A"
             iv_percentile = f"{float(m.implied_volatility_percentile) * 100:.1f}%" if m.implied_volatility_percentile else "N/A"
             beta = f"{float(m.beta):.2f}" if m.beta else "N/A"
-            borrow_rate = f"{float(m.borrow_rate):.2f}%" if hasattr(m, 'borrow_rate') and m.borrow_rate else "N/A"
+
+            # Format earnings info
+            earnings_info = "N/A"
+            if hasattr(m, 'earnings') and m.earnings:
+                earnings_info = f"{m.earnings.expected_report_date} ({m.earnings.time_of_day})"
 
             row = [
                 m.symbol,
@@ -276,19 +258,13 @@ async def get_metrics(symbols: list[str]) -> str:
                 iv_percentile,
                 beta,
                 m.liquidity_rating or "N/A",
-                borrow_rate
+                m.lendability or "N/A",
+                earnings_info
             ]
             table_data.append(row)
 
-            # Add earnings info as a separate row if available
-            if hasattr(m, 'earnings') and m.earnings:
-                table_data.append([
-                    f"↳ Next Earnings: {m.earnings.expected_report_date} ({m.earnings.time_of_day})",
-                    "", "", "", "", ""
-                ])
-
         output = ["Market Metrics:", ""]
-        output.append(tabulate(table_data, headers=headers, tablefmt="grid"))
+        output.append(tabulate(table_data, headers=headers, tablefmt="plain"))
         return "\n".join(output)
     except Exception as e:
         return f"Error fetching market metrics: {str(e)}"
@@ -300,18 +276,8 @@ async def get_prices(
     option_type: Literal["C", "P"] | None = None,
     strike: float | None = None,
 ) -> str:
-    """Get current bid/ask prices for a stock or option. Note that scheduled trades will execute at the market price, not the price returned by this tool.
-
-    Args:
-        underlying_symbol: Underlying symbol (e.g., "SPY", "AAPL")
-        expiration_date: Optional expiration date in YYYY-MM-DD format for options
-        option_type: Optional option type ("C" for call, "P" for put)
-        strike: Optional strike price
-
-    Returns:
-        String containing bid and ask prices
-    """
-    result = await get_prices_internal(underlying_symbol, expiration_date, option_type, strike)
+    """Get current bid/ask prices for a stock or option."""
+    result = await tastytrade_api.get_prices(underlying_symbol, expiration_date, option_type, strike)
     if isinstance(result, tuple):
         bid, ask = result
         return (
@@ -322,12 +288,14 @@ async def get_prices(
     return result
 
 def main():
+    from .auth_cli import auth
+
     try:
         if len(sys.argv) > 1 and sys.argv[1] == "setup":
             sys.exit(0 if auth() else 1)
 
-        # Initialize account state
-        account_state.session
+        # Initialize API and ensure we have a valid session
+        _ = tastytrade_api.session
 
         logger.info("Server is running")
         mcp.run()

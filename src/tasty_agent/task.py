@@ -5,7 +5,7 @@ from typing import Literal
 from pydantic import BaseModel
 from tastytrade.instruments import Option, Equity
 
-from .trading import place_trade
+from .tastytrade_api import TastytradeAPI
 from ..utils import is_market_open, get_time_until_market_open, format_time_delta
 
 logger = logging.getLogger(__name__)
@@ -36,7 +36,8 @@ class Task(BaseModel):
                 )
                 await asyncio.sleep(get_time_until_market_open().total_seconds())
 
-            result = await place_trade(
+            api = TastytradeAPI.get_instance()
+            result = await api.place_trade(
                 instrument=self.instrument,
                 quantity=self.quantity,
                 action=self.action,
@@ -50,6 +51,3 @@ class Task(BaseModel):
             error_msg = f"Task {self.task_id} failed: {str(e)}"
             logger.error(error_msg)
             return error_msg
-
-# Task Storage
-scheduled_tasks: dict[str, Task] = {}
