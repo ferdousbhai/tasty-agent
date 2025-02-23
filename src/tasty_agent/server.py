@@ -247,10 +247,14 @@ async def get_metrics(symbols: list[str]) -> str:
             iv_percentile = f"{float(m.implied_volatility_percentile) * 100:.1f}%" if m.implied_volatility_percentile else "N/A"
             beta = f"{float(m.beta):.2f}" if m.beta else "N/A"
 
-            # Format earnings info
+            # Format earnings info safely to avoid 'None (None)'
             earnings_info = "N/A"
-            if hasattr(m, 'earnings') and m.earnings:
-                earnings_info = f"{m.earnings.expected_report_date} ({m.earnings.time_of_day})"
+            earnings = getattr(m, "earnings", None)
+            if earnings is not None:
+                expected = getattr(earnings, "expected_report_date", None)
+                time_of_day = getattr(earnings, "time_of_day", None)
+                if expected is not None and time_of_day is not None:
+                    earnings_info = f"{expected} ({time_of_day})"
 
             row = [
                 m.symbol,

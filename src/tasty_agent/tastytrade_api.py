@@ -118,7 +118,7 @@ class TastytradeAPI:
                 # Find matching expiration
                 exp_date = expiration_date.date()
                 expiration = next(
-                    (exp for exp in option_chain.expirations 
+                    (exp for exp in option_chain.expirations
                     if exp.expiration_date == exp_date),
                     None
                 )
@@ -190,6 +190,7 @@ class TastytradeAPI:
         try:
             async with DXLinkStreamer(self.session) as streamer:
                 await streamer.subscribe(Quote, [streamer_symbol])
+                # Get the quote
                 quote = await asyncio.wait_for(streamer.get_event(Quote), timeout=10.0)
                 return Decimal(str(quote.bid_price)), Decimal(str(quote.ask_price))
         except asyncio.TimeoutError:
