@@ -95,58 +95,48 @@ class TastytradeAPI:
         strike: float | None = None,
     ) -> Option | Equity | None:
         """Create an instrument object for a given symbol."""
-        try:
-            # If no option parameters, treat as equity
-            if not any([expiration_date, option_type, strike]):
-                return Equity.get_equity(self.session, underlying_symbol)
+        # If no option parameters, treat as equity
+        if not any([expiration_date, option_type, strike]):
+            return Equity.get_equity(self.session, underlying_symbol)
 
-            # Validate all option parameters are present
-            if not all([expiration_date, option_type, strike]):
-                logger.error("Must provide all option parameters (expiration_date, option_type, strike) or none")
-                return None
-
-            try:
-                # Get option chain
-                chain: list[NestedOptionChain] = NestedOptionChain.get_chain(self.session, underlying_symbol)
-
-                if not chain:
-                    logger.error(f"No option chain found for {underlying_symbol}")
-                    return None
-
-                option_chain = chain[0]
-
-                # Find matching expiration
-                exp_date = expiration_date.date()
-                expiration = next(
-                    (exp for exp in option_chain.expirations
-                    if exp.expiration_date == exp_date),
-                    None
-                )
-                if not expiration:
-                    logger.error(f"No expiration found for date {exp_date}")
-                    return None
-
-                # Find matching strike
-                strike_obj = next(
-                    (s for s in expiration.strikes 
-                    if float(s.strike_price) == strike),
-                    None
-                )
-                if not strike_obj:
-                    logger.error(f"No strike found for {strike}")
-                    return None
-
-                # Get option symbol based on type
-                option_symbol = strike_obj.call if option_type == "C" else strike_obj.put
-                return Option.get_option(self.session, option_symbol)
-
-            except Exception as e:
-                logger.error(f"Error getting option chain: {e}")
-                return None
-
-        except Exception as e:
-            logger.error(f"Error getting instrument for {underlying_symbol}: {e}")
+        # Validate all option parameters are present
+        if not all([expiration_date, option_type, strike]):
+            logger.error("Must provide all option parameters (expiration_date, option_type, strike) or none")
             return None
+
+        # Get option chain
+        chain: list[NestedOptionChain] = NestedOptionChain.get_chain(self.session, underlying_symbol)
+
+        if not chain:
+            logger.error(f"No option chain found for {underlying_symbol}")
+            return None
+
+        option_chain = chain[0]
+
+        # Find matching expiration
+        exp_date = expiration_date.date()
+        expiration = next(
+            (exp for exp in option_chain.expirations
+            if exp.expiration_date == exp_date),
+            None
+        )
+        if not expiration:
+            logger.error(f"No expiration found for date {exp_date}")
+            return None
+
+        # Find matching strike
+        strike_obj = next(
+            (s for s in expiration.strikes 
+            if float(s.strike_price) == strike),
+            None
+        )
+        if not strike_obj:
+            logger.error(f"No strike found for {strike}")
+            return None
+
+        # Get option symbol based on type
+        option_symbol = strike_obj.call if option_type == "C" else strike_obj.put
+        return Option.get_option(self.session, option_symbol)
 
     async def get_prices(
         self,
@@ -156,47 +146,41 @@ class TastytradeAPI:
         strike: float | None = None,
     ) -> tuple[Decimal, Decimal] | str:
         """Get current bid/ask prices for a stock or option."""
-        try:
-            # Convert expiration_date string to datetime if provided
-            expiry_datetime = None
-            if expiration_date:
-                try:
-                    expiry_datetime = datetime.strptime(expiration_date, "%Y-%m-%d")
-                except ValueError:
-                    return "Invalid expiration date format. Please use YYYY-MM-DD format"
+        # Convert expiration_date string to datetime if provided
+        expiry_datetime = None
+        if expiration_date:
+            expiry_datetime = datetime.strptime(expiration_date, "%Y-%m-%d")
 
-            # Get instrument
-            instrument = await self.create_instrument(
-                underlying_symbol=underlying_symbol,
-                expiration_date=expiry_datetime,
-                option_type=option_type,
-                strike=strike
-            )
-            if instrument is None:
-                return f"Could not find instrument for symbol: {underlying_symbol}"
+        # Get instrument
+        instrument = await self.create_instrument(
+            underlying_symbol=underlying_symbol,
+            expiration_date=expiry_datetime,
+            option_type=option_type,
+            strike=strike
+        )
+        if instrument is None:
+            return f"Could not find instrument for symbol: {underlying_symbol}"
 
-            # Get streamer symbol
-            streamer_symbol = instrument.streamer_symbol
-            if not streamer_symbol:
-                return f"Could not get streamer symbol for {instrument.symbol}"
+        # Get streamer symbol
+        streamer_symbol = instrument.streamer_symbol
+        if not streamer_symbol:
+            return f"Could not get streamer symbol for {instrument.symbol}"
 
-            return await self.get_quote(streamer_symbol)
-
-        except Exception as e:
-            return f"Error fetching prices: {str(e)}"
+        return await self.get_quote(streamer_symbol)
 
     async def get_quote(self, streamer_symbol: str) -> tuple[Decimal, Decimal] | str:
         """Get current quote for a symbol."""
-        try:
-            async with DXLinkStreamer(self.session) as streamer:
+        async with DXLinkStreamer(self.session) as streamer:
+            try:
                 await streamer.subscribe(Quote, [streamer_symbol])
                 # Get the quote
                 quote = await asyncio.wait_for(streamer.get_event(Quote), timeout=10.0)
                 return Decimal(str(quote.bid_price)), Decimal(str(quote.ask_price))
-        except asyncio.TimeoutError:
-            return f"Timed out waiting for quote data for {streamer_symbol}"
-        except Exception as e:
-            return f"Error getting quote: {str(e)}"
+            except asyncio.TimeoutError:
+                return f"Timed out waiting for quote data for {streamer_symbol}"
+            except asyncio.CancelledError:
+                # Handle WebSocket cancellation explicitly
+                return f"WebSocket connection interrupted for {streamer_symbol}"
 
     def get_nlv_history(self, time_back: str) -> list:
         """Get net liquidating value history."""
@@ -250,161 +234,154 @@ class TastytradeAPI:
         action: Literal["Buy to Open", "Sell to Close"],
         dry_run: bool = False
     ) -> str:
-        """Place a trade for the given instrument"""
+        """Place a trade with the specified parameters."""
         try:
-            # Get current price
-            try:
-                result = await self.get_prices(instrument.symbol)
-                if isinstance(result, str):
-                    return result
-                bid, ask = result
-                price = float(ask if action == "Buy to Open" else bid)
-            except Exception as e:
-                error_msg = f"Failed to get price for {instrument.symbol}: {str(e)}"
+            # Get current bid/ask prices
+            bid, ask = await self.get_quote(instrument.streamer_symbol)
+            # Use bid for selling, ask for buying
+            price = float(ask if action == "Buy to Open" else bid)
+        except Exception as e:
+            error_msg = f"Failed to get price for {instrument.symbol}: {str(e)}"
+            logger.error(error_msg)
+            return error_msg
+
+        if action == "Buy to Open":
+            multiplier = instrument.multiplier if hasattr(instrument, 'multiplier') else 1
+            balances = await self.get_balances()
+            order_value = Decimal(str(price)) * Decimal(str(quantity)) * Decimal(str(multiplier))
+
+            # Use the appropriate buying power based on instrument type
+            buying_power = (
+                balances.derivative_buying_power
+                if isinstance(instrument, Option)
+                else balances.equity_buying_power
+            )
+
+            if order_value > buying_power:
+                original_quantity = quantity
+                quantity = int(buying_power / (Decimal(str(price)) * Decimal(str(multiplier))))
+                logger.warning(
+                    f"Reduced order quantity from {original_quantity} to {quantity} due to buying power limits"
+                )
+                if quantity <= 0:
+                    error_msg = "Order rejected: Exceeds available funds"
+                    logger.error(error_msg)
+                    return error_msg
+
+        else:  # Sell to Close
+            positions = await self.get_positions()
+            position = next((p for p in positions if p.symbol == instrument.symbol), None)
+            if not position:
+                error_msg = f"No open position found for {instrument.symbol}"
+                logger.error(error_msg)
+                return f"Error: No open position found for {instrument.symbol}"
+
+            orders = self.get_live_orders()
+            pending_sell_quantity = sum(
+                sum(leg.quantity for leg in order.legs)
+                for order in orders
+                if (order.status in (OrderStatus.LIVE, OrderStatus.RECEIVED) and
+                    any(leg.symbol == instrument.symbol and
+                        leg.action == OrderAction.SELL_TO_CLOSE
+                        for leg in order.legs))
+            )
+
+            available_quantity = position.quantity - pending_sell_quantity
+            logger.info(
+                f"Position: {position.quantity}, Pending sells: {pending_sell_quantity}, Available: {available_quantity}"
+            )
+
+            if available_quantity <= 0:
+                error_msg = (
+                    f"Cannot place order - entire position of {position.quantity} "
+                    f"already has pending sell orders"
+                )
+                logger.error(error_msg)
+                return f"Error: {error_msg}"
+
+            if quantity > available_quantity:
+                logger.warning(
+                    f"Reducing sell quantity from {quantity} to {available_quantity} (maximum available)"
+                )
+                quantity = available_quantity
+
+            if quantity <= 0:
+                error_msg = f"Position quantity ({available_quantity}) insufficient for requested sale"
+                logger.error(error_msg)
+                return f"Error: {error_msg}"
+
+        order_action = OrderAction.BUY_TO_OPEN if action == "Buy to Open" else OrderAction.SELL_TO_CLOSE
+        leg: Leg = instrument.build_leg(quantity, order_action)
+
+        logger.info(
+            f"Placing initial order: {action} {quantity} {instrument.symbol} @ ${price:.2f}"
+        )
+
+        initial_order = NewOrder(
+            time_in_force=OrderTimeInForce.DAY,
+            order_type=OrderType.LIMIT,
+            legs=[leg],
+            price=Decimal(str(price)) * (-1 if action == "Buy to Open" else 1)
+        )
+
+        response = self.place_order(initial_order, dry_run=dry_run)
+        if response.errors:
+            error_msg = "Order failed with errors:\n" + "\n".join(str(error) for error in response.errors)
+            logger.error(error_msg)
+            return error_msg
+
+        if dry_run:
+            msg = "Dry run successful"
+            if response.warnings:
+                msg += "\nWarnings:\n" + "\n".join(str(w) for w in response.warnings)
+            logger.info(msg)
+            return msg
+
+        current_order = response.order
+        for attempt in range(20):
+            await asyncio.sleep(15.0)
+
+            orders = self.get_live_orders()
+            order = next((o for o in orders if o.id == current_order.id), None)
+
+            if not order:
+                error_msg = "Order not found during monitoring"
                 logger.error(error_msg)
                 return error_msg
 
-            if action == "Buy to Open":
-                multiplier = instrument.multiplier if hasattr(instrument, 'multiplier') else 1
-                balances = await self.get_balances()
-                order_value = Decimal(str(price)) * Decimal(str(quantity)) * Decimal(str(multiplier))
+            if order.status == OrderStatus.FILLED:
+                success_msg = "Order filled successfully"
+                logger.info(success_msg)
+                self.invalidate_positions()
+                self.invalidate_balances()
+                return success_msg
 
-                # Use the appropriate buying power based on instrument type
-                buying_power = (
-                    balances.derivative_buying_power
-                    if isinstance(instrument, Option)
-                    else balances.equity_buying_power
-                )
+            if order.status not in (OrderStatus.LIVE, OrderStatus.RECEIVED):
+                error_msg = f"Order in unexpected status: {order.status}"
+                logger.error(error_msg)
+                return error_msg
 
-                if order_value > buying_power:
-                    original_quantity = quantity
-                    quantity = int(buying_power / (Decimal(str(price)) * Decimal(str(multiplier))))
-                    logger.warning(
-                        f"Reduced order quantity from {original_quantity} to {quantity} due to buying power limits"
-                    )
-                    if quantity <= 0:
-                        error_msg = "Order rejected: Exceeds available funds"
-                        logger.error(error_msg)
-                        return error_msg
-
-            else:  # Sell to Close
-                positions = await self.get_positions()
-                position = next((p for p in positions if p.symbol == instrument.symbol), None)
-                if not position:
-                    error_msg = f"No open position found for {instrument.symbol}"
-                    logger.error(error_msg)
-                    return f"Error: No open position found for {instrument.symbol}"
-
-                orders = self.get_live_orders()
-                pending_sell_quantity = sum(
-                    sum(leg.quantity for leg in order.legs)
-                    for order in orders
-                    if (order.status in (OrderStatus.LIVE, OrderStatus.RECEIVED) and
-                        any(leg.symbol == instrument.symbol and
-                            leg.action == OrderAction.SELL_TO_CLOSE
-                            for leg in order.legs))
-                )
-
-                available_quantity = position.quantity - pending_sell_quantity
-                logger.info(
-                    f"Position: {position.quantity}, Pending sells: {pending_sell_quantity}, Available: {available_quantity}"
-                )
-
-                if available_quantity <= 0:
-                    error_msg = (
-                        f"Cannot place order - entire position of {position.quantity} "
-                        f"already has pending sell orders"
-                    )
-                    logger.error(error_msg)
-                    return f"Error: {error_msg}"
-
-                if quantity > available_quantity:
-                    logger.warning(
-                        f"Reducing sell quantity from {quantity} to {available_quantity} (maximum available)"
-                    )
-                    quantity = available_quantity
-
-                if quantity <= 0:
-                    error_msg = f"Position quantity ({available_quantity}) insufficient for requested sale"
-                    logger.error(error_msg)
-                    return f"Error: {error_msg}"
-
-            order_action = OrderAction.BUY_TO_OPEN if action == "Buy to Open" else OrderAction.SELL_TO_CLOSE
-            leg: Leg = instrument.build_leg(quantity, order_action)
-
+            price_delta = 0.01 if action == "Buy to Open" else -0.01
+            new_price = float(order.price) + price_delta
             logger.info(
-                f"Placing initial order: {action} {quantity} {instrument.symbol} @ ${price:.2f}"
+                f"Adjusting order price from ${float(order.price):.2f} to ${new_price:.2f} (attempt {attempt + 1}/20)"
             )
 
-            initial_order = NewOrder(
+            new_order = NewOrder(
                 time_in_force=OrderTimeInForce.DAY,
                 order_type=OrderType.LIMIT,
                 legs=[leg],
-                price=Decimal(str(price)) * (-1 if action == "Buy to Open" else 1)
+                price=Decimal(str(new_price)) * (-1 if action == "Buy to Open" else 1)
             )
 
-            response = self.place_order(initial_order, dry_run=dry_run)
+            response = self.replace_order(order.id, new_order)
             if response.errors:
-                error_msg = "Order failed with errors:\n" + "\n".join(str(error) for error in response.errors)
+                error_msg = f"Failed to adjust order: {response.errors}"
                 logger.error(error_msg)
                 return error_msg
 
-            if dry_run:
-                msg = "Dry run successful"
-                if response.warnings:
-                    msg += "\nWarnings:\n" + "\n".join(str(w) for w in response.warnings)
-                logger.info(msg)
-                return msg
-
             current_order = response.order
-            for attempt in range(20):
-                await asyncio.sleep(15.0)
 
-                orders = self.get_live_orders()
-                order = next((o for o in orders if o.id == current_order.id), None)
-
-                if not order:
-                    error_msg = "Order not found during monitoring"
-                    logger.error(error_msg)
-                    return error_msg
-
-                if order.status == OrderStatus.FILLED:
-                    success_msg = "Order filled successfully"
-                    logger.info(success_msg)
-                    self.invalidate_positions()
-                    self.invalidate_balances()
-                    return success_msg
-
-                if order.status not in (OrderStatus.LIVE, OrderStatus.RECEIVED):
-                    error_msg = f"Order in unexpected status: {order.status}"
-                    logger.error(error_msg)
-                    return error_msg
-
-                price_delta = 0.01 if action == "Buy to Open" else -0.01
-                new_price = float(order.price) + price_delta
-                logger.info(
-                    f"Adjusting order price from ${float(order.price):.2f} to ${new_price:.2f} (attempt {attempt + 1}/20)"
-                )
-
-                new_order = NewOrder(
-                    time_in_force=OrderTimeInForce.DAY,
-                    order_type=OrderType.LIMIT,
-                    legs=[leg],
-                    price=Decimal(str(new_price)) * (-1 if action == "Buy to Open" else 1)
-                )
-
-                response = self.replace_order(order.id, new_order)
-                if response.errors:
-                    error_msg = f"Failed to adjust order: {response.errors}"
-                    logger.error(error_msg)
-                    return error_msg
-
-                current_order = response.order
-
-            final_msg = "Order not filled after 20 price adjustments"
-            logger.warning(final_msg)
-            return final_msg
-
-        except Exception as e:
-            logger.exception("Error placing trade")
-            return f"Error placing trade: {str(e)}"
+        final_msg = "Order not filled after 20 price adjustments"
+        logger.warning(final_msg)
+        return final_msg
