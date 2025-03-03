@@ -11,6 +11,7 @@ from mcp.server.fastmcp import FastMCP
 from tabulate import tabulate
 
 from .tastytrade_api import TastytradeAPI
+from .job_queue import JobQueue
 from ..utils import is_market_open, format_time_until, get_next_market_open
 
 logger = logging.getLogger(__name__)
@@ -21,17 +22,24 @@ tastytrade_api = TastytradeAPI.get_instance()
 # Initialize APScheduler
 scheduler = AsyncIOScheduler(jobstores={'default': MemoryJobStore()})
 
+# Initialize Job Queue
+job_queue = JobQueue(scheduler)
+
 # MCP Server
 mcp = FastMCP("TastyTrade")
 
 # Get a human-readable status for a scheduled job
 def get_job_status(job: Job) -> str:
     """Get a human-readable status string for a job"""
-    if not job or not job.next_run_time:
-        return "Unknown"
+    try:
+        if not job or not hasattr(job, 'next_run_time') or job.next_run_time is None:
+            return "Unknown"
 
-    time_str = format_time_until(job.next_run_time)
-    return f"Executing in {time_str}"
+        time_str = format_time_until(job.next_run_time)
+        return f"Executing in {time_str}"
+    except AttributeError:
+        # Handle the case where next_run_time isn't available
+        return "Pending (scheduler not started)"
 
 @mcp.resource("file://scheduled_trades/tasks/list")
 async def get_scheduled_trades():
@@ -151,7 +159,7 @@ async def schedule_trade(
             else:
                 return f"Trade execution failed: {message}"
         else:
-            # Schedule for market open - use a wrapper function to execute when scheduled
+            # Schedule for market open
             async def execute_scheduled_trade():
                 try:
                     success, message = await execute_trade()
@@ -161,24 +169,22 @@ async def schedule_trade(
                         logger.error(f"Scheduled trade failed (job: {job_id}): {message}")
                 except Exception as e:
                     logger.error(f"Error executing scheduled trade (job: {job_id}): {str(e)}")
-                finally:
-                    # Always remove the job after execution attempt
-                    scheduler.remove_job(job_id)
 
             # Get the next market open time
             next_market_open = get_next_market_open()
 
-            # Schedule the job for the exact market open time
-            job = scheduler.add_job(
-                execute_scheduled_trade,
-                'date',  # Use a one-time date trigger instead of cron
+            # Add the job to the queue for sequential execution
+            await job_queue.add_job(
+                job_func=execute_scheduled_trade,
                 run_date=next_market_open,
-                id=job_id
+                job_id=job_id
             )
 
-            next_run = job.next_run_time
-            time_until = format_time_until(next_run)
-            return f"Trade scheduled as job {job_id} - will execute at next market open ({next_market_open.strftime('%Y-%m-%d %H:%M:%S %Z')}): in {time_until}"
+            try:
+                time_until = format_time_until(next_market_open)
+                return f"Trade scheduled as job {job_id} - will execute at next market open ({next_market_open.strftime('%Y-%m-%d %H:%M:%S %Z')}): in {time_until}"
+            except AttributeError:
+                return f"Trade scheduled as job {job_id} - will execute at next market open ({next_market_open.strftime('%Y-%m-%d %H:%M:%S %Z')})"
 
     except Exception as e:
         logger.error(f"Error scheduling trade: {e}", exc_info=True)
@@ -192,6 +198,11 @@ async def remove_scheduled_trade(job_id: str) -> str:
         job_id: The ID of the scheduled trade to remove
     """
     try:
+        # Try to remove from queue first
+        if job_queue.remove_job(job_id):
+            return f"Successfully removed scheduled job from queue: {job_id}"
+            
+        # If not in queue, try to remove from scheduler
         job = scheduler.get_job(job_id)
         if not job:
             return f"No scheduled job found with ID: {job_id}"
