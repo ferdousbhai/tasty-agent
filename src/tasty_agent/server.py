@@ -41,8 +41,8 @@ def get_job_status(job: Job) -> str:
         # Handle the case where next_run_time isn't available
         return "Pending (scheduler not started)"
 
-@mcp.resource("file://scheduled_trades/tasks/list")
-async def get_scheduled_trades():
+@mcp.tool()
+async def list_scheduled_trades() -> str:
     """List all pending scheduled trades with execution status and details."""
     try:
         jobs = scheduler.get_jobs()

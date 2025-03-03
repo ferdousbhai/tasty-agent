@@ -75,8 +75,14 @@ uvx tasty-agent setup
      - Trades during market closure are automatically scheduled for next market open
 
 2. `list_scheduled_trades`
-   - List all scheduled trades
-   - Returns: Formatted table showing Task ID, Time, Type, and Description
+   - List all pending scheduled trades
+   - Returns: Formatted table showing:
+     - Position: Order in queue
+     - ID: Unique task identifier
+     - Action: Buy to Open or Sell to Close
+     - Instrument: Symbol and option details if applicable
+     - Quantity: Number of shares/contracts
+     - Status: Time until execution or current status
 
 3. `remove_scheduled_trade`
    - Remove a scheduled trade
