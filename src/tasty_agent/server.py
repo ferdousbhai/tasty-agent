@@ -35,7 +35,7 @@ def get_job_status(job: Job) -> str:
 
 @mcp.resource("file://scheduled_trades/tasks/list")
 async def get_scheduled_trades():
-    """Get a list of all scheduled trades."""
+    """List all pending scheduled trades with execution status and details."""
     try:
         jobs = scheduler.get_jobs()
         if not jobs:
@@ -86,7 +86,17 @@ async def schedule_trade(
     expiration_date: str | None = None,
     dry_run: bool = False,
 ) -> str:
-    """Schedule a trade for execution."""
+    """Schedule stock/option trade for immediate or market-open execution.
+
+    Args:
+        action: Buy to Open or Sell to Close
+        quantity: Number of shares/contracts
+        underlying_symbol: Stock ticker symbol
+        strike: Option strike price (if option)
+        option_type: C for Call, P for Put (if option)
+        expiration_date: Option expiry in YYYY-MM-DD format (if option)
+        dry_run: Test without executing if True
+    """
     try:
         expiry_datetime = None
         if expiration_date:
@@ -176,7 +186,11 @@ async def schedule_trade(
 
 @mcp.tool()
 async def remove_scheduled_trade(job_id: str) -> str:
-    """Remove a scheduled trade by its job ID."""
+    """Cancel a scheduled trade by its job ID.
+
+    Args:
+        job_id: The ID of the scheduled trade to remove
+    """
     try:
         job = scheduler.get_job(job_id)
         if not job:
@@ -191,7 +205,11 @@ async def remove_scheduled_trade(job_id: str) -> str:
 def plot_nlv_history(
     time_back: Literal['1d', '1m', '3m', '6m', '1y', 'all'] = '1y'
 ) -> str:
-    """Plot account's net liquidating value history as base64 PNG."""
+    """Generate a plot of account value history as base64 PNG.
+
+    Args:
+        time_back: Time period to plot (1d=1 day, 1m=1 month, etc.)
+    """
     try:
         import io
         import base64
@@ -225,7 +243,7 @@ def plot_nlv_history(
 
 @mcp.tool()
 async def get_account_balances() -> str:
-    """Get current account balances and buying power."""
+    """Retrieve current account cash balance, buying power, and net liquidating value."""
     try:
         balances = await tastytrade_api.get_balances()
         return (
@@ -241,7 +259,7 @@ async def get_account_balances() -> str:
 
 @mcp.tool()
 async def get_open_positions() -> str:
-    """Get all currently open positions in the trading account."""
+    """List all currently open stock and option positions with current values."""
     try:
         positions = await tastytrade_api.get_positions()
         if not positions:
@@ -274,11 +292,7 @@ async def get_open_positions() -> str:
 
 @mcp.tool()
 def get_transaction_history(start_date: str | None = None) -> str:
-    """Get detailed transaction history.
-
-    start_date: YYYY-MM-DD format (e.g., '2024-01-01'). Last 90 days if not provided.
-    Shows: Date, Type, Description, Value in USD
-    """
+    """Get account transaction history from start_date (YYYY-MM-DD) or last 90 days."""
     try:
         # Default to 90 days if no date provided
         if start_date is None:
@@ -312,10 +326,10 @@ def get_transaction_history(start_date: str | None = None) -> str:
 
 @mcp.tool()
 async def get_metrics(symbols: list[str]) -> str:
-    """Get market metrics for stock symbols.
+    """Get market metrics for symbols (IV Rank, Beta, Liquidity, Earnings).
 
-    symbols: List of stock symbols (e.g., ["SPY", "AAPL"])
-    Shows: IV Rank/Percentile, Beta, Liquidity, Lendability, Earnings
+    Args:
+        symbols: List of stock ticker symbols to get metrics for
     """
     try:
         metrics_data = await tastytrade_api.get_market_metrics(symbols)
@@ -369,7 +383,14 @@ async def get_prices(
     option_type: Literal["C", "P"] | None = None,
     strike: float | None = None,
 ) -> str:
-    """Get current bid/ask prices for a stock or option."""
+    """Get current bid/ask prices for stock or option.
+
+    Args:
+        underlying_symbol: Stock ticker symbol
+        expiration_date: Option expiry in YYYY-MM-DD format (for options)
+        option_type: C for Call, P for Put (for options)
+        strike: Option strike price (for options)
+    """
     try:
         if expiration_date:
             try:
@@ -392,21 +413,46 @@ async def get_prices(
 
 def main():
     from .auth_cli import auth
+    import threading
+    import time
+
+    # Handle setup command
+    if len(sys.argv) > 1 and sys.argv[1] == "setup":
+        sys.exit(0 if auth() else 1)
 
     try:
-        if len(sys.argv) > 1 and sys.argv[1] == "setup":
-            sys.exit(0 if auth() else 1)
-
         # Initialize API and ensure we have a valid session
         _ = tastytrade_api.session
         logger.info("Server is starting")
 
-        # Start the APScheduler
-        scheduler.start()
+        # Define a function to start the scheduler after a short delay
+        # This ensures MCP has time to initialize its event loop
+        def delayed_scheduler_start():
+            # Give MCP server a moment to initialize
+            time.sleep(2)
 
-        # Run the MCP server
+            try:
+                # Start the scheduler in a separate thread
+                logger.info("Starting scheduler...")
+                scheduler.start()
+                logger.info("Scheduler started successfully")
+            except Exception as e:
+                logger.error(f"Error starting scheduler: {e}")
+                # Don't exit, just log the error
+
+        # Start the scheduler in a background thread
+        threading.Thread(target=delayed_scheduler_start, daemon=True).start()
+
+        # Run the MCP server - this will create its own event loop with anyio.run()
+        logger.info("Starting MCP server...")
         mcp.run()
 
     except Exception as e:
         logger.error(f"Error in running server: {e}")
+        # Attempt to shutdown the scheduler if it's running
+        try:
+            scheduler.shutdown()
+            logger.info("Scheduler shut down")
+        except Exception as shutdown_error:
+            logger.error(f"Error shutting down scheduler: {shutdown_error}")
         sys.exit(1)

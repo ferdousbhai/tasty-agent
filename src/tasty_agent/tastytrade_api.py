@@ -146,41 +146,53 @@ class TastytradeAPI:
         strike: float | None = None,
     ) -> tuple[Decimal, Decimal] | str:
         """Get current bid/ask prices for a stock or option."""
-        # Convert expiration_date string to datetime if provided
-        expiry_datetime = None
-        if expiration_date:
-            expiry_datetime = datetime.strptime(expiration_date, "%Y-%m-%d")
+        try:
+            # Convert expiration_date string to datetime if provided
+            expiry_datetime = None
+            if expiration_date:
+                try:
+                    expiry_datetime = datetime.strptime(expiration_date, "%Y-%m-%d")
+                except ValueError as e:
+                    return f"Invalid expiration date format: {e}. Use YYYY-MM-DD format."
 
-        # Get instrument
-        instrument = await self.create_instrument(
-            underlying_symbol=underlying_symbol,
-            expiration_date=expiry_datetime,
-            option_type=option_type,
-            strike=strike
-        )
-        if instrument is None:
-            return f"Could not find instrument for symbol: {underlying_symbol}"
+            # Get instrument
+            instrument = await self.create_instrument(
+                underlying_symbol=underlying_symbol,
+                expiration_date=expiry_datetime,
+                option_type=option_type,
+                strike=strike
+            )
+            if instrument is None:
+                return f"Could not find instrument for symbol: {underlying_symbol}"
 
-        # Get streamer symbol
-        streamer_symbol = instrument.streamer_symbol
-        if not streamer_symbol:
-            return f"Could not get streamer symbol for {instrument.symbol}"
+            # Get streamer symbol
+            streamer_symbol = instrument.streamer_symbol
+            if not streamer_symbol:
+                return f"Could not get streamer symbol for {instrument.symbol}"
 
-        return await self.get_quote(streamer_symbol)
+            return await self.get_quote(streamer_symbol)
+        except Exception as e:
+            logger.error(f"Error getting prices for {underlying_symbol}: {str(e)}")
+            return f"Error getting prices for {underlying_symbol}: {str(e)}"
 
     async def get_quote(self, streamer_symbol: str) -> tuple[Decimal, Decimal] | str:
         """Get current quote for a symbol."""
-        async with DXLinkStreamer(self.session) as streamer:
-            try:
+        try:
+            async with DXLinkStreamer(self.session) as streamer:
                 await streamer.subscribe(Quote, [streamer_symbol])
                 # Get the quote
                 quote = await asyncio.wait_for(streamer.get_event(Quote), timeout=10.0)
                 return Decimal(str(quote.bid_price)), Decimal(str(quote.ask_price))
-            except asyncio.TimeoutError:
-                return f"Timed out waiting for quote data for {streamer_symbol}"
-            except asyncio.CancelledError:
-                # Handle WebSocket cancellation explicitly
-                return f"WebSocket connection interrupted for {streamer_symbol}"
+        except asyncio.TimeoutError:
+            return f"Timed out waiting for quote data for {streamer_symbol}"
+        except asyncio.CancelledError:
+            # Handle WebSocket cancellation explicitly
+            logger.warning(f"WebSocket connection interrupted for {streamer_symbol}")
+            return f"WebSocket connection interrupted for {streamer_symbol}"
+        except Exception as e:
+            # Catch all other exceptions
+            logger.error(f"Error getting quote for {streamer_symbol}: {str(e)}")
+            return f"Error getting quote for {streamer_symbol}: {str(e)}"
 
     def get_nlv_history(self, time_back: str) -> list:
         """Get net liquidating value history."""
