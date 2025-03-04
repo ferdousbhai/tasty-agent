@@ -45,8 +45,8 @@ class TastytradeAPI:
             raise ValueError("Failed to create Tastytrade session.")
 
         self._account = (
-            Account.get_account(self._session, self.account_id) 
-            if self.account_id 
+            Account.get_account(self._session, self.account_id)
+            if self.account_id
             else Account.get_accounts(self._session)[0]
         )
         self._last_session_refresh = datetime.now()
@@ -126,7 +126,7 @@ class TastytradeAPI:
 
         # Find matching strike
         strike_obj = next(
-            (s for s in expiration.strikes 
+            (s for s in expiration.strikes
             if float(s.strike_price) == strike),
             None
         )
@@ -241,12 +241,72 @@ class TastytradeAPI:
 
     async def place_trade(
         self,
-        instrument: Option | Equity,
+        underlying_symbol: str,
         quantity: int,
         action: Literal["Buy to Open", "Sell to Close"],
-        dry_run: bool = False
-    ) -> str:
-        """Place a trade with the specified parameters."""
+        expiration_date: str | None = None,
+        option_type: Literal["C", "P"] | None = None,
+        strike: float | None = None,
+        dry_run: bool = False,
+        job_id: str | None = None,
+        check_market_open: bool = True
+    ) -> tuple[bool, str]:
+        """Place a trade with the specified parameters.
+
+        Args:
+            underlying_symbol: The symbol of the stock or underlying for an option
+            quantity: Number of shares/contracts
+            action: Buy to Open or Sell to Close
+            expiration_date: Option expiration date in YYYY-MM-DD format (None for equity)
+            option_type: Option type, 'C' for call or 'P' for put (None for equity)
+            strike: Option strike price (None for equity)
+            dry_run: If True, simulate without executing
+            job_id: Optional ID for logging purposes
+            check_market_open: If True, will check if market is open before executing
+
+        Returns:
+            Tuple of (success, message)
+        """
+        log_prefix = f"[Job: {job_id}] " if job_id else ""
+
+        # Check if market is open if requested
+        if check_market_open:
+            from ..utils import is_market_open
+            if not is_market_open():
+                msg = "Market closed, cannot execute trade"
+                logger.warning(f"{log_prefix}{msg}")
+                return False, msg
+
+        try:
+            # Convert expiration_date string to datetime if provided
+            expiry_datetime = None
+            if expiration_date:
+                try:
+                    expiry_datetime = datetime.strptime(expiration_date, "%Y-%m-%d")
+                except ValueError as e:
+                    error_msg = f"Invalid expiration date format: {e}. Use YYYY-MM-DD format."
+                    logger.error(f"{log_prefix}{error_msg}")
+                    return False, error_msg
+
+            # Create the instrument
+            instrument = await self.create_instrument(
+                underlying_symbol=underlying_symbol,
+                expiration_date=expiry_datetime,
+                option_type=option_type,
+                strike=strike
+            )
+
+            if instrument is None:
+                error_msg = f"Could not create instrument for symbol: {underlying_symbol}"
+                if expiration_date:
+                    error_msg += f" with expiration {expiration_date}, type {option_type}, strike {strike}"
+                logger.error(f"{log_prefix}{error_msg}")
+                return False, error_msg
+        except Exception as e:
+            error_msg = f"Error creating instrument for {underlying_symbol}: {str(e)}"
+            logger.error(f"{log_prefix}{error_msg}")
+            return False, error_msg
+
         try:
             # Get current bid/ask prices
             bid, ask = await self.get_quote(instrument.streamer_symbol)
@@ -254,8 +314,8 @@ class TastytradeAPI:
             price = float(ask if action == "Buy to Open" else bid)
         except Exception as e:
             error_msg = f"Failed to get price for {instrument.symbol}: {str(e)}"
-            logger.error(error_msg)
-            return error_msg
+            logger.error(f"{log_prefix}{error_msg}")
+            return False, error_msg
 
         if action == "Buy to Open":
             multiplier = instrument.multiplier if hasattr(instrument, 'multiplier') else 1
@@ -273,20 +333,20 @@ class TastytradeAPI:
                 original_quantity = quantity
                 quantity = int(buying_power / (Decimal(str(price)) * Decimal(str(multiplier))))
                 logger.warning(
-                    f"Reduced order quantity from {original_quantity} to {quantity} due to buying power limits"
+                    f"{log_prefix}Reduced order quantity from {original_quantity} to {quantity} due to buying power limits"
                 )
                 if quantity <= 0:
                     error_msg = "Order rejected: Exceeds available funds"
-                    logger.error(error_msg)
-                    return error_msg
+                    logger.error(f"{log_prefix}{error_msg}")
+                    return False, error_msg
 
         else:  # Sell to Close
             positions = await self.get_positions()
             position = next((p for p in positions if p.symbol == instrument.symbol), None)
             if not position:
                 error_msg = f"No open position found for {instrument.symbol}"
-                logger.error(error_msg)
-                return f"Error: No open position found for {instrument.symbol}"
+                logger.error(f"{log_prefix}{error_msg}")
+                return False, f"Error: No open position found for {instrument.symbol}"
 
             orders = self.get_live_orders()
             pending_sell_quantity = sum(
@@ -300,7 +360,7 @@ class TastytradeAPI:
 
             available_quantity = position.quantity - pending_sell_quantity
             logger.info(
-                f"Position: {position.quantity}, Pending sells: {pending_sell_quantity}, Available: {available_quantity}"
+                f"{log_prefix}Position: {position.quantity}, Pending sells: {pending_sell_quantity}, Available: {available_quantity}"
             )
 
             if available_quantity <= 0:
@@ -308,25 +368,25 @@ class TastytradeAPI:
                     f"Cannot place order - entire position of {position.quantity} "
                     f"already has pending sell orders"
                 )
-                logger.error(error_msg)
-                return f"Error: {error_msg}"
+                logger.error(f"{log_prefix}{error_msg}")
+                return False, f"Error: {error_msg}"
 
             if quantity > available_quantity:
                 logger.warning(
-                    f"Reducing sell quantity from {quantity} to {available_quantity} (maximum available)"
+                    f"{log_prefix}Reducing sell quantity from {quantity} to {available_quantity} (maximum available)"
                 )
                 quantity = available_quantity
 
             if quantity <= 0:
                 error_msg = f"Position quantity ({available_quantity}) insufficient for requested sale"
-                logger.error(error_msg)
-                return f"Error: {error_msg}"
+                logger.error(f"{log_prefix}{error_msg}")
+                return False, f"Error: {error_msg}"
 
         order_action = OrderAction.BUY_TO_OPEN if action == "Buy to Open" else OrderAction.SELL_TO_CLOSE
         leg: Leg = instrument.build_leg(quantity, order_action)
 
         logger.info(
-            f"Placing initial order: {action} {quantity} {instrument.symbol} @ ${price:.2f}"
+            f"{log_prefix}Placing initial order: {action} {quantity} {instrument.symbol} @ ${price:.2f}"
         )
 
         initial_order = NewOrder(
@@ -336,64 +396,70 @@ class TastytradeAPI:
             price=Decimal(str(price)) * (-1 if action == "Buy to Open" else 1)
         )
 
-        response = self.place_order(initial_order, dry_run=dry_run)
-        if response.errors:
-            error_msg = "Order failed with errors:\n" + "\n".join(str(error) for error in response.errors)
-            logger.error(error_msg)
-            return error_msg
-
-        if dry_run:
-            msg = "Dry run successful"
-            if response.warnings:
-                msg += "\nWarnings:\n" + "\n".join(str(w) for w in response.warnings)
-            logger.info(msg)
-            return msg
-
-        current_order = response.order
-        for attempt in range(20):
-            await asyncio.sleep(15.0)
-
-            orders = self.get_live_orders()
-            order = next((o for o in orders if o.id == current_order.id), None)
-
-            if not order:
-                error_msg = "Order not found during monitoring"
-                logger.error(error_msg)
-                return error_msg
-
-            if order.status == OrderStatus.FILLED:
-                success_msg = "Order filled successfully"
-                logger.info(success_msg)
-                self.invalidate_positions()
-                self.invalidate_balances()
-                return success_msg
-
-            if order.status not in (OrderStatus.LIVE, OrderStatus.RECEIVED):
-                error_msg = f"Order in unexpected status: {order.status}"
-                logger.error(error_msg)
-                return error_msg
-
-            price_delta = 0.01 if action == "Buy to Open" else -0.01
-            new_price = float(order.price) + price_delta
-            logger.info(
-                f"Adjusting order price from ${float(order.price):.2f} to ${new_price:.2f} (attempt {attempt + 1}/20)"
-            )
-
-            new_order = NewOrder(
-                time_in_force=OrderTimeInForce.DAY,
-                order_type=OrderType.LIMIT,
-                legs=[leg],
-                price=Decimal(str(new_price)) * (-1 if action == "Buy to Open" else 1)
-            )
-
-            response = self.replace_order(order.id, new_order)
+        try:
+            response = self.place_order(initial_order, dry_run=dry_run)
             if response.errors:
-                error_msg = f"Failed to adjust order: {response.errors}"
-                logger.error(error_msg)
-                return error_msg
+                error_msg = "Order failed with errors:\n" + "\n".join(str(error) for error in response.errors)
+                logger.error(f"{log_prefix}{error_msg}")
+                return False, error_msg
+
+            if dry_run:
+                msg = "Dry run successful"
+                if response.warnings:
+                    msg += "\nWarnings:\n" + "\n".join(str(w) for w in response.warnings)
+                logger.info(f"{log_prefix}{msg}")
+                return True, msg
 
             current_order = response.order
+            for attempt in range(20):
+                await asyncio.sleep(15.0)
 
-        final_msg = "Order not filled after 20 price adjustments"
-        logger.warning(final_msg)
-        return final_msg
+                orders = self.get_live_orders()
+                order = next((o for o in orders if o.id == current_order.id), None)
+
+                if not order:
+                    error_msg = "Order not found during monitoring"
+                    logger.error(f"{log_prefix}{error_msg}")
+                    return False, error_msg
+
+                if order.status == OrderStatus.FILLED:
+                    success_msg = f"Order filled successfully: {order.id}"
+                    logger.info(f"{log_prefix}{success_msg}")
+                    self.invalidate_positions()
+                    self.invalidate_balances()
+                    return True, success_msg
+
+                if order.status not in (OrderStatus.LIVE, OrderStatus.RECEIVED):
+                    error_msg = f"Order in unexpected status: {order.status}"
+                    logger.error(f"{log_prefix}{error_msg}")
+                    return False, error_msg
+
+                price_delta = 0.01 if action == "Buy to Open" else -0.01
+                new_price = float(order.price) + price_delta
+                logger.info(
+                    f"{log_prefix}Adjusting order price from ${float(order.price):.2f} to ${new_price:.2f} (attempt {attempt + 1}/20)"
+                )
+
+                new_order = NewOrder(
+                    time_in_force=OrderTimeInForce.DAY,
+                    order_type=OrderType.LIMIT,
+                    legs=[leg],
+                    price=Decimal(str(new_price)) * (-1 if action == "Buy to Open" else 1)
+                )
+
+                response = self.replace_order(order.id, new_order)
+                if response.errors:
+                    error_msg = f"Failed to adjust order: {response.errors}"
+                    logger.error(f"{log_prefix}{error_msg}")
+                    return False, error_msg
+
+                current_order = response.order
+
+            final_msg = "Order not filled after 20 price adjustments"
+            logger.warning(f"{log_prefix}{final_msg}")
+            return False, final_msg
+
+        except Exception as e:
+            error_msg = f"Error placing order: {str(e)}"
+            logger.error(f"{log_prefix}{error_msg}")
+            return False, error_msg

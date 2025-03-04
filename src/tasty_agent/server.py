@@ -1,29 +1,26 @@
 from datetime import timedelta, datetime, date
 import logging
-import sys
-from typing import Literal
+from typing import Literal, Any
 from uuid import uuid4
+import asyncio
 
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.jobstores.memory import MemoryJobStore
+from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.job import Job
 from mcp.server.fastmcp import FastMCP
 from tabulate import tabulate
 
 from .tastytrade_api import TastytradeAPI
-from .job_queue import JobQueue
 from ..utils import is_market_open, format_time_until, get_next_market_open
 
 logger = logging.getLogger(__name__)
 
-# Tastytrade API
+
 tastytrade_api = TastytradeAPI.get_instance()
 
-# Initialize APScheduler
-scheduler = AsyncIOScheduler(jobstores={'default': MemoryJobStore()})
+scheduler = BackgroundScheduler()
 
-# Initialize Job Queue
-job_queue = JobQueue(scheduler)
+# Using Python's built-in ordered dictionary as queue for FIFO processing (Python 3.7+)
+trade_queue: dict[str, dict[str, Any]] = {}
 
 # MCP Server
 mcp = FastMCP("TastyTrade")
@@ -35,51 +32,84 @@ def get_job_status(job: Job) -> str:
         if not job or not hasattr(job, 'next_run_time') or job.next_run_time is None:
             return "Unknown"
 
-        time_str = format_time_until(job.next_run_time)
-        return f"Executing in {time_str}"
-    except AttributeError:
-        # Handle the case where next_run_time isn't available
-        return "Pending (scheduler not started)"
+        # Format: "Scheduled: Running in X minutes/hours/etc."
+        return f"Scheduled: {format_time_until(job.next_run_time)}"
+    except Exception as e:
+        logger.error(f"Error getting job status: {e}")
+        return "Status Error"
+
+# Function to process the trade queue at market open
+async def process_trade_queue():
+    """Process all trades in the queue sequentially when market opens"""
+    logger.info(f"Starting to process trade queue with {len(trade_queue)} pending trades")
+
+    try:
+        # Process all trades in sequence using a copy of the keys
+        for job_id in list(trade_queue.keys()):
+            if job_id not in trade_queue:  # Skip already removed jobs
+                continue
+
+            job_data = trade_queue[job_id]
+            logger.info(f"Executing queued trade: {job_id}")
+
+            try:
+                # Execute trade with the new method signature
+                success, result = await tastytrade_api.place_trade(
+                    underlying_symbol=job_data.get('underlying_symbol'),
+                    quantity=job_data.get('quantity'),
+                    action=job_data.get('action'),
+                    expiration_date=job_data.get('expiration_date'),
+                    option_type=job_data.get('option_type'),
+                    strike=job_data.get('strike'),
+                    dry_run=job_data.get('dry_run', False),
+                    job_id=job_id
+                )
+                logger.info(f"Trade executed: {result}")
+            except Exception as e:
+                logger.error(f"Error executing queued trade {job_id}: {e}")
+            finally:
+                # Remove the job from queue
+                trade_queue.pop(job_id, None)  # Safely remove if exists
+
+            # Small delay between trades
+            await asyncio.sleep(1)
+
+    except Exception as e:
+        logger.error(f"Error processing trade queue: {e}")
+
+    # Clear any remaining jobs
+    trade_queue.clear()
+    logger.info("Finished processing trade queue")
 
 @mcp.tool()
 async def list_scheduled_trades() -> str:
     """List all pending scheduled trades with execution status and details."""
     try:
-        jobs = scheduler.get_jobs()
-        if not jobs:
+        if not trade_queue:
             return "No scheduled trades"
 
-        headers = ["Position", "ID", "Action", "Instrument", "Quantity", "Status"]
         rows = []
+        next_market_open = get_next_market_open()
+        market_open_str = f"Queued for next market open (in {format_time_until(next_market_open)})"
 
-        for i, job in enumerate(jobs, 1):
-            # Extract trade info from job kwargs
-            kwargs = job.kwargs
-            if not kwargs:
-                continue
-
-            action = kwargs.get('action')
-            underlying = kwargs.get('underlying_symbol')
-            quantity = kwargs.get('quantity')
-
-            if not all([action, underlying, quantity]):
-                continue
-
-            # Build description
-            description = kwargs.get('description')
-            if not description:
-                description = f"{action} {quantity} {underlying}"
-                option_type = kwargs.get('option_type')
-                strike = kwargs.get('strike')
-                exp_date = kwargs.get('expiration_date')
-                if option_type and strike and exp_date:
-                    description += f" {option_type}{strike} exp {exp_date.strftime('%Y-%m-%d')}"
+        for i, (job_id, job_data) in enumerate(trade_queue.items(), 1):
+            # Build instrument description
+            instrument = job_data.get('underlying_symbol', '')
+            if all(job_data.get(k) for k in ['option_type', 'strike', 'expiration_date']):
+                exp_date = job_data['expiration_date']
+                exp_str = exp_date.strftime('%Y-%m-%d') if hasattr(exp_date, 'strftime') else exp_date
+                instrument += f" {job_data['option_type']}{job_data['strike']} exp {exp_str}"
 
             rows.append([
-                i, job.id, action, description, quantity, get_job_status(job)
+                i,
+                job_id,
+                job_data.get('action', ''),
+                instrument,
+                job_data.get('quantity', ''),
+                market_open_str
             ])
 
-        return tabulate(rows, headers, tablefmt="grid")
+        return tabulate(rows, ["Position", "ID", "Action", "Instrument", "Quantity", "Status"], tablefmt="plain")
     except Exception as e:
         logger.error(f"Error retrieving scheduled trades: {e}", exc_info=True)
         return f"Error retrieving scheduled trades: {e}"
@@ -94,7 +124,9 @@ async def schedule_trade(
     expiration_date: str | None = None,
     dry_run: bool = False,
 ) -> str:
-    """Schedule stock/option trade for immediate or market-open execution.
+    """Schedule stock/option trade for immediate or market-open execution. Trade will be executed at next market open if market is closed (at best available price).
+    Scheduled trades only persist while the server is running. If the server restarts, pending trades will be lost.
+    When scheduling multiple trades, the order of execution is FIFO.
 
     Args:
         action: Buy to Open or Sell to Close
@@ -106,21 +138,13 @@ async def schedule_trade(
         dry_run: Test without executing if True
     """
     try:
-        expiry_datetime = None
+        # Validate expiration date format if provided
         if expiration_date:
             try:
-                expiry_datetime = datetime.strptime(expiration_date, "%Y-%m-%d")
+                # Just validate the format, we'll pass the string directly to place_trade
+                datetime.strptime(expiration_date, "%Y-%m-%d")
             except ValueError:
                 return "Invalid expiration date format. Please use YYYY-MM-DD format"
-
-        instrument = await tastytrade_api.create_instrument(
-            underlying_symbol=underlying_symbol,
-            expiration_date=expiry_datetime,
-            option_type=option_type,
-            strike=strike
-        )
-        if instrument is None:
-            return f"Could not find instrument for symbol: {underlying_symbol}"
 
         # Create job ID and description
         job_id = str(uuid4())
@@ -128,63 +152,57 @@ async def schedule_trade(
         if option_type:
             description += f" {option_type}{strike} exp {expiration_date}"
 
-        # Define the execute_trade function that will be called directly or scheduled
-        async def execute_trade() -> tuple[bool, str]:
-            """Execute the trade directly"""
-            # Ensure we're in market hours before attempting execution
-            if not is_market_open():
-                logger.warning(f"Market closed, cannot execute trade (job: {job_id})")
-                return False, "Market is closed"
-
-            api = TastytradeAPI.get_instance()
-            try:
-                result = await api.place_trade(
-                    instrument=instrument,
-                    quantity=quantity,
-                    action=action,
-                    dry_run=dry_run
-                )
-                logger.info(f"Trade executed successfully (job: {job_id}): {result}")
-                return True, str(result)
-            except Exception as e:
-                error_msg = f"Execution failed: {str(e)}"
-                logger.error(f"Trade failed (job: {job_id}): {error_msg}")
-                return False, error_msg
-
+        # If market is open, execute immediately
         if is_market_open():
-            # Execute immediately
-            success, message = await execute_trade()
+            success, message = await tastytrade_api.place_trade(
+                underlying_symbol=underlying_symbol,
+                quantity=quantity,
+                action=action,
+                expiration_date=expiration_date,
+                option_type=option_type,
+                strike=strike,
+                dry_run=dry_run,
+                job_id=job_id,
+                check_market_open=False  # Already checked above
+            )
+
             if success:
                 return f"Trade executed immediately: {message}"
             else:
                 return f"Trade execution failed: {message}"
+
+        # If market is closed, queue for next market open
         else:
-            # Schedule for market open
-            async def execute_scheduled_trade():
-                try:
-                    success, message = await execute_trade()
-                    if success:
-                        logger.info(f"Scheduled trade completed successfully (job: {job_id}): {message}")
-                    else:
-                        logger.error(f"Scheduled trade failed (job: {job_id}): {message}")
-                except Exception as e:
-                    logger.error(f"Error executing scheduled trade (job: {job_id}): {str(e)}")
+            # Prepare job data for the queue with all necessary info
+            job_data = {
+                'job_id': job_id,
+                'action': action,
+                'quantity': quantity,
+                'underlying_symbol': underlying_symbol,
+                'expiration_date': expiration_date,
+                'option_type': option_type,
+                'strike': strike,
+                'description': description,
+                'dry_run': dry_run
+            }
 
-            # Get the next market open time
+            # Add job to queue
+            trade_queue[job_id] = job_data
+
+            # Schedule a job to process the queue at market open if not already scheduled
             next_market_open = get_next_market_open()
+            queue_processor_job = scheduler.get_job('market_open_queue_processor')
+            if not queue_processor_job:
+                scheduler.add_job(
+                    process_trade_queue,
+                    'date',
+                    run_date=next_market_open,
+                    id='market_open_queue_processor'
+                )
+                logger.info(f"Scheduled queue processor to run at market open: {next_market_open}")
 
-            # Add the job to the queue for sequential execution
-            await job_queue.add_job(
-                job_func=execute_scheduled_trade,
-                run_date=next_market_open,
-                job_id=job_id
-            )
-
-            try:
-                time_until = format_time_until(next_market_open)
-                return f"Trade scheduled as job {job_id} - will execute at next market open ({next_market_open.strftime('%Y-%m-%d %H:%M:%S %Z')}): in {time_until}"
-            except AttributeError:
-                return f"Trade scheduled as job {job_id} - will execute at next market open ({next_market_open.strftime('%Y-%m-%d %H:%M:%S %Z')})"
+            time_until = format_time_until(next_market_open)
+            return f"Trade queued as job {job_id} - will execute at next market open ({next_market_open.strftime('%Y-%m-%d %H:%M:%S')}): in {time_until}"
 
     except Exception as e:
         logger.error(f"Error scheduling trade: {e}", exc_info=True)
@@ -198,17 +216,9 @@ async def remove_scheduled_trade(job_id: str) -> str:
         job_id: The ID of the scheduled trade to remove
     """
     try:
-        # Try to remove from queue first
-        if job_queue.remove_job(job_id):
+        if job_id in trade_queue:
+            del trade_queue[job_id]
             return f"Successfully removed scheduled job from queue: {job_id}"
-            
-        # If not in queue, try to remove from scheduler
-        job = scheduler.get_job(job_id)
-        if not job:
-            return f"No scheduled job found with ID: {job_id}"
-
-        scheduler.remove_job(job_id)
-        return f"Successfully removed scheduled job: {job_id}"
     except Exception as e:
         return f"Error removing scheduled job: {str(e)}"
 
@@ -303,7 +313,7 @@ async def get_open_positions() -> str:
 
 @mcp.tool()
 def get_transaction_history(start_date: str | None = None) -> str:
-    """Get account transaction history from start_date (YYYY-MM-DD) or last 90 days."""
+    """Get account transaction history from start_date (YYYY-MM-DD) or last 90 days (if no date provided)."""
     try:
         # Default to 90 days if no date provided
         if start_date is None:
@@ -337,11 +347,7 @@ def get_transaction_history(start_date: str | None = None) -> str:
 
 @mcp.tool()
 async def get_metrics(symbols: list[str]) -> str:
-    """Get market metrics for symbols (IV Rank, Beta, Liquidity, Earnings).
-
-    Args:
-        symbols: List of stock ticker symbols to get metrics for
-    """
+    """Get market metrics for symbols (IV Rank, Beta, Liquidity, Earnings)."""
     try:
         metrics_data = await tastytrade_api.get_market_metrics(symbols)
         if not metrics_data:
@@ -423,47 +429,9 @@ async def get_prices(
         return f"Error getting prices: {str(e)}"
 
 def main():
-    from .auth_cli import auth
-    import threading
-    import time
-
-    # Handle setup command
-    if len(sys.argv) > 1 and sys.argv[1] == "setup":
-        sys.exit(0 if auth() else 1)
-
     try:
-        # Initialize API and ensure we have a valid session
-        _ = tastytrade_api.session
-        logger.info("Server is starting")
-
-        # Define a function to start the scheduler after a short delay
-        # This ensures MCP has time to initialize its event loop
-        def delayed_scheduler_start():
-            # Give MCP server a moment to initialize
-            time.sleep(2)
-
-            try:
-                # Start the scheduler in a separate thread
-                logger.info("Starting scheduler...")
-                scheduler.start()
-                logger.info("Scheduler started successfully")
-            except Exception as e:
-                logger.error(f"Error starting scheduler: {e}")
-                # Don't exit, just log the error
-
-        # Start the scheduler in a background thread
-        threading.Thread(target=delayed_scheduler_start, daemon=True).start()
-
-        # Run the MCP server - this will create its own event loop with anyio.run()
-        logger.info("Starting MCP server...")
+        scheduler.start() # background scheduler
         mcp.run()
-
-    except Exception as e:
-        logger.error(f"Error in running server: {e}")
-        # Attempt to shutdown the scheduler if it's running
-        try:
+    finally:
+        if scheduler.running:
             scheduler.shutdown()
-            logger.info("Scheduler shut down")
-        except Exception as shutdown_error:
-            logger.error(f"Error shutting down scheduler: {shutdown_error}")
-        sys.exit(1)

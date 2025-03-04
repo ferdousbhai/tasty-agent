@@ -4,9 +4,15 @@ from zoneinfo import ZoneInfo
 
 
 def get_next_market_open() -> datetime.datetime:
+    """Get the next market open time for NYSE with timezone information.
+
+    Returns:
+        A timezone-aware datetime object representing the next market open time.
+    """
     nyse = get_calendar('XNYS')  # NYSE calendar
     current_time = datetime.datetime.now(ZoneInfo('America/New_York'))
-    return nyse.next_open(current_time)
+    next_open = nyse.next_open(current_time)
+    return next_open
 
 
 def is_market_open() -> bool:
