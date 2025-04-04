@@ -26,7 +26,7 @@ uvx tasty-agent
 
 ### Authentication
 
-The server requires TastyTrade credentials. For security, these are set up via command line and stored in your system's keyring (Keychain on macOS, Windows Credential Manager on Windows, or similar secure storage on other platforms):
+The server requires TastyTrade credentials. For security, this is set up via command line and stored in your system's keyring (Keychain on macOS, Windows Credential Manager on Windows, or similar secure storage on other platforms):
 
 ```bash
 uvx tasty-agent setup

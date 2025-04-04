@@ -210,11 +210,7 @@ async def schedule_trade(
 
 @mcp.tool()
 async def remove_scheduled_trade(job_id: str) -> str:
-    """Cancel a scheduled trade by its job ID.
-
-    Args:
-        job_id: The ID of the scheduled trade to remove
-    """
+    """Cancel a scheduled trade by its job ID."""
     try:
         if job_id in trade_queue:
             del trade_queue[job_id]
@@ -223,43 +219,59 @@ async def remove_scheduled_trade(job_id: str) -> str:
         return f"Error removing scheduled job: {str(e)}"
 
 @mcp.tool()
-def plot_nlv_history(
-    time_back: Literal['1d', '1m', '3m', '6m', '1y', 'all'] = '1y'
+async def plot_nlv_history(
+    time_back: Literal['1d', '1m', '3m', '6m', '1y', 'all'] = '1y',
+    show_web: bool = True
 ) -> str:
-    """Generate a plot of account value history as base64 PNG.
-
+    """Generate a plot of account value history and display it via web browser.
+    
+    When show_web=True, this function returns a clickable URL.
+    Please return this URL to the user so that they can click it to view the chart in their browser.
+    
     Args:
-        time_back: Time period to plot (1d=1 day, 1m=1 month, etc.)
+        time_back: Time period to plot (1d=1 day, 1m=1 month, 3m=3 months, 6m=6 months, 1y=1 year, all=all time)
+        show_web: Whether to display the plot in a web browser (default: True)
     """
     try:
+        from . import chart_server
+        
+        # Get portfolio history data
+        history = tastytrade_api.get_nlv_history(time_back=time_back)
+        if not history or len(history) == 0:
+            return "No history data available for the selected time period."
+            
+        # If web display is requested, use the chart server
+        if show_web:
+            try:
+                chart_url = await chart_server.create_nlv_chart(history, time_back)
+                return f"View your portfolio chart here:\n{chart_url}\n\nPortfolio value history for the past {time_back} is now available in your browser."
+            except Exception as e:
+                logger.error(f"Error with web chart: {e}", exc_info=True)
+                return f"Unable to display chart in web browser. The chart data has been processed but the web server encountered an error: {str(e)}"
+        
+        # Otherwise generate base64 image for direct display
         import io
         import base64
         import matplotlib
-        import matplotlib.pyplot as plt
-
-        try:
-            history = tastytrade_api.get_nlv_history(time_back=time_back)
-            if not history or len(history) == 0:
-                return "No history data available for the selected time period."
-        except Exception as e:
-            logger.error(f"Error retrieving NLV history: {e}", exc_info=True)
-            return f"Unable to retrieve portfolio history: {str(e)}"
-
         matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        
         fig, ax = plt.subplots(figsize=(10, 6))
         ax.plot([n.time for n in history], [n.close for n in history], 'b-')
         ax.set_title(f'Portfolio Value History (Past {time_back})')
         ax.set_xlabel('Date')
         ax.set_ylabel('Portfolio Value ($)')
         ax.grid(True)
-
+        
         buffer = io.BytesIO()
         fig.savefig(buffer, format='png')
         buffer.seek(0)
         base64_str = base64.b64encode(buffer.read()).decode('utf-8')
         plt.close(fig)
+        
         return base64_str
     except Exception as e:
+        logger.error(f"Error in plot_nlv_history: {e}", exc_info=True)
         return f"Error generating plot: {str(e)}"
 
 @mcp.tool()
