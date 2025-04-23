@@ -4,6 +4,7 @@ from decimal import Decimal
 from typing import Literal, Self
 import keyring
 import logging
+import os
 
 from tastytrade import Session, Account, metrics
 from tastytrade.account import AccountBalance, CurrentPosition
@@ -27,12 +28,15 @@ class TastytradeAPI:
         self._balances: AccountBalance | None = None
 
         # Credentials
-        self.username = keyring.get_password("tastytrade", "username")
-        self.password = keyring.get_password("tastytrade", "password")
-        self.account_id = keyring.get_password("tastytrade", "account_id")
+        self.username = keyring.get_password("tastytrade", "username") or os.getenv("TASTYTRADE_USERNAME")
+        self.password = keyring.get_password("tastytrade", "password") or os.getenv("TASTYTRADE_PASSWORD")
+        self.account_id = keyring.get_password("tastytrade", "account_id") or os.getenv("TASTYTRADE_ACCOUNT_ID")
 
         if not self.username or not self.password:
-            raise ValueError("Missing Tastytrade credentials in keyring. Use keyring.set_password() to set them.")
+            raise ValueError(
+                "Missing Tastytrade credentials. Please run 'tasty-agent setup' or set "
+                "TASTYTRADE_USERNAME and TASTYTRADE_PASSWORD environment variables."
+            )
 
     def _needs_session_refresh(self) -> bool:
         if not self._last_session_refresh:

@@ -32,6 +32,14 @@ The server requires TastyTrade credentials. For security, this is set up via com
 uvx tasty-agent setup
 ```
 
+Alternatively, you can set the following environment variables:
+
+- `TASTYTRADE_USERNAME`: Your Tastytrade username
+- `TASTYTRADE_PASSWORD`: Your Tastytrade password
+- `TASTYTRADE_ACCOUNT_ID`: Your Tastytrade account number (optional if you only have one account)
+
+If credentials are found in both the keyring and environment variables, the keyring values will take precedence.
+
 ### Tools
 
 #### Portfolio Management
