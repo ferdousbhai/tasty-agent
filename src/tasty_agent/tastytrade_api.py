@@ -253,7 +253,6 @@ class TastytradeAPI:
         strike: float | None = None,
         dry_run: bool = False,
         job_id: str | None = None,
-        check_market_open: bool = True
     ) -> tuple[bool, str]:
         """Place a trade with the specified parameters.
 
@@ -266,20 +265,11 @@ class TastytradeAPI:
             strike: Option strike price (None for equity)
             dry_run: If True, simulate without executing
             job_id: Optional ID for logging purposes
-            check_market_open: If True, will check if market is open before executing
 
         Returns:
             Tuple of (success, message)
         """
         log_prefix = f"[Job: {job_id}] " if job_id else ""
-
-        # Check if market is open if requested
-        if check_market_open:
-            from ..utils import is_market_open
-            if not is_market_open():
-                msg = "Market closed, cannot execute trade"
-                logger.warning(f"{log_prefix}{msg}")
-                return False, msg
 
         try:
             # Convert expiration_date string to datetime if provided

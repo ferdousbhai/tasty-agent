@@ -7,11 +7,10 @@ requires-python = ">=3.12"
 dependencies = [
     "keyring",
     "matplotlib",
-    "mcp[cli]>=1.2.0",
+    "mcp[cli]>=1.6.0",
     "tastytrade>=9.7",
     "exchange-calendars>=4.8",
     "tabulate>=0.9.0",
-    "apscheduler>=3.11.0",
     "fastapi>=0.115.12",
     "uvicorn>=0.34.0",
 ]
@@ -26,7 +25,7 @@ classifiers = [
 ]
 
 [project.scripts]
-tasty-agent = "src.tasty_agent.server:main"
+tasty-agent = "src.tasty_agent.server:mcp.run"
 
 [build-system]
 requires = ["hatchling"]
