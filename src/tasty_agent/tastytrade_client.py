@@ -222,6 +222,11 @@ class TastytradeClient:
         """Replace an existing order."""
         return self.account.replace_order(self.session, order_id, new_order)
 
+    # Barebone delete_order, mirrors replace_order structure
+    def delete_order(self, order_id: str) -> dict:
+        """delete an existing live order."""
+        return self.account.delete_order(self.session, order_id)
+
     # Singleton pattern
     _instance: Self | None = None
 
@@ -479,7 +484,7 @@ class TastytradeClient:
             order = next((o for o in orders if o.id == current_order.id), None)
 
             if not order:
-                # If order disappears, it might have been filled very quickly or cancelled externally
+                # If order disappears, it might have been filled very quickly or deleteled externally
                 error_msg = f"Order {current_order.id} not found during monitoring. It might have filled or been cancelled."
                 logger.warning(f"{log_prefix}{error_msg}")
                 # Invalidate cache as state is unclear and return uncertainty
@@ -541,6 +546,12 @@ class TastytradeClient:
         # --- Monitoring Loop Completed Without Fill ---
         final_msg = f"Order {current_order.id} not filled after 20 price adjustments."
         logger.warning(f"{log_prefix}{final_msg}")
-        # Consider cancelling the order here?
-        # self.cancel_order(current_order.id) # Needs a cancel_order method implementation
+
+        # Attempt to delete the lingering order - fire and forget
+        try:
+            self.delete_order(current_order.id)
+        except Exception as e:
+            # Log the error if deletion fails, but don't change the return message
+            logger.error(f"{log_prefix}Failed to delete lingering order {current_order.id}: {str(e)}")
+        # Return False because the trade did not fill
         return False, final_msg
