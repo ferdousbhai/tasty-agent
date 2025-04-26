@@ -1,170 +1,60 @@
 from datetime import timedelta, datetime, date
-import logging
 from typing import Literal, Any, AsyncIterator
 from uuid import uuid4
 import asyncio
 from dataclasses import dataclass, field
 from tabulate import tabulate
 from contextlib import asynccontextmanager
+import logging
 
 from mcp.server.fastmcp import FastMCP, Context
 
-from .tastytrade_api import TastytradeAPI
+from .tastytrade_client import TastytradeClient
 from ..utils import is_market_open, format_time_until, get_next_market_open
 
 logger = logging.getLogger(__name__)
 
-
-tastytrade_api = TastytradeAPI.get_instance()
+tastytrade_client = TastytradeClient.get_instance()
 
 
 @dataclass
 class ScheduledTradeJob:
     job_id: str
     description: str
-    status: Literal["queued", "processing", "cancelled", "completed", "failed"]
+    status: Literal["scheduled", "processing", "cancelling", "cancelled", "completed", "failed"]
     trade_params: dict[str, Any]
+    execution_task: asyncio.Task | None = None # Task for delayed execution
     created_at: datetime = field(default_factory=datetime.now)
     scheduled_execution_time: datetime | None = None # Informational only
-
 
 # --- Define a dataclass for the lifespan state ---
 @dataclass
 class ServerContext:
-    trade_queue: asyncio.Queue[str]
     pending_trades: dict[str, ScheduledTradeJob]
-    trade_processor_task: asyncio.Task | None
-
-
-# --- Trade Processor Task ---
-async def _trade_processor(queue: asyncio.Queue[str], trades: dict[str, ScheduledTradeJob]):
-    """Processes trades sequentially. Waits for market open if closed."""
-    logger.info("Trade processor task started.")
-    while True:
-        job_id = None # Reset job_id each iteration
-        try:
-            if is_market_open():
-                logger.debug("Trade processor: Market is open. Checking queue...")
-                # Market is open, poll queue quickly
-                try:
-                    # Use a short timeout to remain responsive to cancellation
-                    # and allow the loop to re-check market status periodically.
-                    job_id = await asyncio.wait_for(queue.get(), timeout=1.0)
-                except asyncio.TimeoutError:
-                    # Queue is empty, loop again to check market status/cancellation
-                    await asyncio.sleep(0.1) # Small sleep prevent tight loop on empty queue
-                    continue
-                except asyncio.CancelledError:
-                     logger.info("Trade processor queue wait cancelled while market open.")
-                     break # Exit loop if task is cancelled
-            else:
-                # Market is closed, wait until next open
-                next_open = get_next_market_open()
-                now = datetime.now(next_open.tzinfo)
-                # Ensure wait_seconds is non-negative
-                wait_seconds = max(0, (next_open - now).total_seconds()) + 5 # Add 5s buffer
-                logger.info(f"Trade processor: Market closed. Waiting {format_time_until(next_open)} (~{wait_seconds:.0f}s) until next open.")
-                try:
-                    # Wait for the calculated duration OR a queue item (less likely)
-                    # This wait_for allows the task to be cancelled during the wait.
-                    job_id = await asyncio.wait_for(queue.get(), timeout=wait_seconds)
-                except asyncio.TimeoutError:
-                    # Waited until market open time, loop again to check market status
-                    continue
-                except asyncio.CancelledError:
-                    logger.info("Trade processor queue wait cancelled while market closed.")
-                    break # Exit loop if task is cancelled
-
-            # --- Process the dequeued job (if one was received) ---
-            if job_id is None: # Should not happen often, but safeguard
-                continue
-
-            job = trades.get(job_id)
-
-            if not job or job.status == "cancelled":
-                if job and job.status == "cancelled":
-                    logger.info(f"Trade processor: Job {job_id} ('{job.description}') was cancelled. Removing.")
-                    # Make sure deletion is safe if job is None (though `get` handles this)
-                    if job_id in trades: del trades[job_id]
-                elif not job:
-                     logger.warning(f"Trade processor: Job ID {job_id} dequeued but not found in pending_trades. Skipping.")
-                queue.task_done()
-                continue
-
-            logger.info(f"Trade processor: Processing job {job_id}: {job.description}")
-            job.status = "processing"
-
-            try:
-                success, message = await tastytrade_api.place_trade(
-                    **job.trade_params, job_id=job.job_id
-                )
-                new_status = "completed" if success else "failed"
-                log_func = logger.info if success else logger.warning
-                log_func(f"Trade processor: Job {job_id} {new_status}: {message}")
-            except Exception as e:
-                logger.error(f"Trade processor: Error executing trade for job {job_id} ('{job.description}'): {e}", exc_info=True)
-                new_status = "failed"
-            finally:
-                 job.status = new_status
-                 queue.task_done()
-            # --- End job processing ---
-
-        except asyncio.CancelledError:
-            logger.info("Trade processor task received cancellation request during main loop.")
-            break
-        except Exception as e:
-            # Catch broader errors in the main loop
-            logger.error(f"Trade processor task encountered an unexpected error: {e}", exc_info=True)
-            # Avoid busy-looping on persistent errors
-            await asyncio.sleep(60)
-
-    logger.info("Trade processor task finished.")
-
+    trade_execution_lock: asyncio.Lock
 
 # --- Lifespan Handler ---
 @asynccontextmanager
 async def lifespan(server: FastMCP) -> AsyncIterator[ServerContext]:
-    """Manages the trade queue and processor task lifecycle via context."""
-    logger.info("Entering lifespan function...")
-    processor_task = None
-    state = None # Initialize state to None
+    """Manages the trade state and lock lifecycle via context."""
+    pending_trades = {}
+    trade_execution_lock = asyncio.Lock()
+    context = ServerContext(
+            pending_trades=pending_trades,
+            trade_execution_lock=trade_execution_lock,
+    )
     try:
-        logger.info("Server lifespan startup: Initializing trade queue and processor.")
-        trade_queue = asyncio.Queue()
-        pending_trades = {}
-        processor_task = asyncio.create_task(_trade_processor(trade_queue, pending_trades))
-        logger.info("Server lifespan startup: Trade processor task created.")
-        # Create an instance of the ServerContext dataclass
-        state = ServerContext(
-             trade_queue=trade_queue,
-             pending_trades=pending_trades,
-             trade_processor_task=processor_task,
-        )
-    except Exception as e:
-        logger.error(f"ERROR DURING LIFESPAN STARTUP: {e}", exc_info=True)
-        # If startup failed, yield a state with None task to avoid issues during cleanup
-        state = ServerContext(trade_queue=asyncio.Queue(), pending_trades={}, trade_processor_task=None)
-
-
-    try:
-        yield state # Yield the ServerContext instance
+        yield context # Yield the ServerContext instance
     finally:
-        logger.info("Server lifespan shutdown: Cancelling trade processor task.")
-        # Access the task from the state if it was successfully created
-        task_to_cancel = state.trade_processor_task if state else None
-        if task_to_cancel and not task_to_cancel.done():
-            task_to_cancel.cancel()
-            try:
-                await task_to_cancel
-            except asyncio.CancelledError:
-                logger.info("Server lifespan shutdown: Trade processor task successfully cancelled.")
-            except Exception as e:
-                logger.error(f"Server lifespan shutdown: Error during task cancellation: {e}", exc_info=True)
-        elif task_to_cancel:
-             logger.info("Server lifespan shutdown: Processor task already done.")
-        else:
-             logger.warning("Server lifespan shutdown: Processor task was not available or never created during startup.")
-        logger.info("Server lifespan shutdown: Background task cleanup complete.")
+        # Cancel any pending trade tasks on shutdown
+        tasks_to_cancel = [
+            job.execution_task for job in context.pending_trades.values()
+            if job.execution_task and not job.execution_task.done()
+        ]
+        if tasks_to_cancel:
+            for task in tasks_to_cancel:
+                task.cancel()
+            await asyncio.gather(*tasks_to_cancel, return_exceptions=True) # Wait for cancellations
 
 
 # --- MCP Server ---
@@ -184,10 +74,10 @@ async def schedule_trade(
     dry_run: bool = False,
 ) -> str:
     """Schedule stock/option trade for immediate or sequential market-open execution.
-    If market is closed, trade is queued. Relies on lifespan context for queue/state.
+    If market is closed, trade is scheduled for execution after next market open.
+    Uses a lock to ensure sequential execution if multiple trades are pending.
 
     Args:
-        ctx: FastMCP context
         action: Buy to Open or Sell to Close
         quantity: Number of shares/contracts
         underlying_symbol: Stock ticker symbol
@@ -198,11 +88,9 @@ async def schedule_trade(
     """
     try:
         lifespan_ctx: ServerContext = ctx.request_context.lifespan_context
-        # Access state via attributes
         pending_trades = lifespan_ctx.pending_trades
-        trade_queue = lifespan_ctx.trade_queue
-    except AttributeError: # More specific exception
-        logger.error("Lifespan context (ServerContext) not accessible via ctx.request_context.lifespan_context.")
+        trade_execution_lock = lifespan_ctx.trade_execution_lock
+    except AttributeError:
         return "Error: Trade scheduling system state not accessible."
 
     try:
@@ -223,87 +111,190 @@ async def schedule_trade(
         "dry_run": dry_run,
     }
 
+    async def execute_trade(exec_job_id: str, exec_params: dict) -> tuple[bool, str]:
+        """(Core) Acquires lock, executes the trade, releases lock.
+        Assumes the caller has already checked job status and market open conditions.
+        Returns (success, message).
+        """
+        async with trade_execution_lock: # Ensure sequential execution
+            try:
+                success, message = await tastytrade_client.place_trade(**exec_params, job_id=exec_job_id)
+                return success, message
+            except Exception as e:
+                return False, f"Trade execution failed: {str(e)}"
+
     try:
         if is_market_open():
-            logger.info(f"Market open. Executing immediately: {description} (Job ID: {job_id})")
-            success, message = await tastytrade_api.place_trade(**trade_params, job_id=job_id)
-            return f"Trade executed immediately: {message}" if success else f"Trade execution failed: {message}"
+            # Market is open, execute immediately after acquiring lock
+            # Create a placeholder job entry mainly for lock coordination & potential race conditions
+            job = ScheduledTradeJob(
+                 job_id=job_id, description=description, status="processing",
+                 trade_params=trade_params, execution_task=None # No separate task needed
+            )
+            pending_trades[job_id] = job # Add temporarily
+            execution_result = await execute_trade(job_id, trade_params)
+            # Decide whether to keep the completed/failed job entry in pending_trades
+            # For simplicity, let's remove it immediately after execution attempt
+            if job_id in pending_trades:
+                 del pending_trades[job_id]
+            return execution_result
         else:
+            # Market is closed, schedule delayed execution
             next_market_open = get_next_market_open()
             time_until = format_time_until(next_market_open)
-            logger.info(f"Market closed. Queuing: {description} (Job ID: {job_id}). Will process after open (in {time_until}).")
+            now_local = datetime.now().astimezone()
+            wait_seconds = max(0, (next_market_open - now_local).total_seconds()) + 30 # Add buffer
+
+            async def run_scheduled_trade(run_job_id: str, run_params: dict):
+                """Task body: Waits for market open, checks status, then calls execute_trade."""
+                job = None # Define job here for access in exception blocks
+                try:
+                    await asyncio.sleep(wait_seconds)
+
+                    # Check job status *after* waking up
+                    job = pending_trades.get(run_job_id)
+                    if not job or job.status != "scheduled":
+                        # Job was cancelled or doesn't exist anymore.
+                        return # Exit quietly
+
+                    # Brief check to ensure market is open (handles edge cases like holidays/short delays)
+                    while not is_market_open():
+                        await asyncio.sleep(30) # Wait if market didn't open exactly as expected
+
+                    # Attempt execution
+                    job.status = "processing"
+                    success, message = await execute_trade(run_job_id, run_params)
+
+                    # Update final status based on execution result
+                    job.status = "completed" if success else "failed"
+                    # No need to return message here, it's handled by the core execute_trade
+
+                except asyncio.CancelledError:
+                    # Handle cancellation initiated by cancel_scheduled_trade
+                    job = pending_trades.get(run_job_id) # Re-fetch job reference
+                    if job and job.status == "cancelling": # Confirm cancellation was intended
+                        job.status = "cancelled"
+                    # else: If status isn't cancelling, it was an unexpected cancel. Log or handle as needed.
+
+                except Exception as e:
+                    # Log unexpected errors during the wait or execution attempt
+                    job = pending_trades.get(run_job_id) # Re-fetch job reference
+                    logger.exception(f"Unexpected error in scheduled trade task {run_job_id}: {e}")
+                    if job:
+                        job.status = "failed"
+                finally:
+                    # Ensure task reference is cleared in all cases (completion, failure, cancellation)
+                    if job:
+                        job.execution_task = None
+
+            # Create the job entry first
             job = ScheduledTradeJob(
-                job_id=job_id, description=description, status="queued",
-                trade_params=trade_params, scheduled_execution_time=next_market_open
+                job_id=job_id, description=description, status="scheduled",
+                trade_params=trade_params, scheduled_execution_time=next_market_open,
+                execution_task=None # Will be set below
             )
-            # Use context variables (attributes)
             pending_trades[job_id] = job
-            # Get the processor task and its loop from the context state
-            processor_task = lifespan_ctx.trade_processor_task
-            if not processor_task: # Ensure task exists
-                 raise RuntimeError("Trade processor task not found in lifespan context.")
-            processor_loop = processor_task.get_loop()
-            # Schedule put operation on the processor's loop
-            future = asyncio.run_coroutine_threadsafe(trade_queue.put(job_id), processor_loop)
-            return f"Market closed. Trade '{description}' queued as job {job_id}. Will execute sequentially after next market open (in {time_until})."
+
+            # Create and store the task
+            delayed_task = asyncio.create_task(run_scheduled_trade(job_id, trade_params))
+            job.execution_task = delayed_task # Store the task reference in the job
+
+            return f"Market closed. Trade '{description}' scheduled as job {job_id}. Will execute after next market open (in {time_until})."
 
     except Exception as e:
-        logger.error(f"Error placing or queuing trade '{description}': {e}", exc_info=True)
-        # Use lock for cleanup check (accessing via attribute)
-        if job_id in lifespan_ctx.pending_trades: # Check before deleting
-            del lifespan_ctx.pending_trades[job_id]
+        # General error during scheduling phase
+        # Clean up if job was partially added
+        if job_id in pending_trades and pending_trades[job_id].status in ["scheduled", "processing"]:
+            if pending_trades[job_id].execution_task:
+                pending_trades[job_id].execution_task.cancel()
+            del pending_trades[job_id]
         return f"Error scheduling trade: {str(e)}"
 
 @mcp.tool()
 async def list_scheduled_trades(ctx: Context) -> str:
-    """Lists currently queued trades (Job ID and description)."""
-    try:
-        lifespan_ctx: ServerContext = ctx.request_context.lifespan_context
-        # Access state via attributes
-        pending_trades = lifespan_ctx.pending_trades
-    except AttributeError: # More specific exception
-        logger.error("Lifespan context (ServerContext) not accessible via ctx.request_context.lifespan_context.")
-        return "Error: Trade scheduling system state not accessible."
+    """Lists currently scheduled or processing trades (Job ID and description)."""
 
-    queued_trades = sorted(
-        [job for job in pending_trades.values() if job.status == 'queued'],
+    pending_trades = ctx.request_context.lifespan_context.pending_trades
+
+    scheduled_trades = sorted(
+        [job for job in pending_trades.values() if job.status == 'scheduled'],
         key=lambda j: j.created_at
     )
-    processing_job = next((job for job in pending_trades.values() if job.status == 'processing'), None)
+    processing_jobs = [
+        job for job in pending_trades.values() if job.status == 'processing'
+    ]
 
-    if not queued_trades and not processing_job:
-         return "No trades are currently waiting in the queue or being processed."
+    if not scheduled_trades and not processing_jobs:
+         return "No trades are currently scheduled or being processed."
 
     output_lines = []
-    if processing_job:
-         output_lines.append(f"Currently processing: Job {processing_job.job_id} ('{processing_job.description}')")
+    if processing_jobs:
+         # Should ideally only be one processing due to the lock, but list just in case
+         output_lines.append("Currently processing:")
+         output_lines.extend([f"- Job {job.job_id}: {job.description}" for job in processing_jobs])
          output_lines.append("")
 
-    if queued_trades:
-        output_lines.append("Scheduled Trades Queue:")
-        output_lines.extend([f"- Job {job.job_id}: {job.description}" for job in queued_trades])
-        output_lines.append(f"\nTotal queued: {len(queued_trades)}")
+    if scheduled_trades:
+        output_lines.append("Scheduled Trades (Waiting for Market Open or Execution Slot):")
+        output_lines.extend([f"- Job {job.job_id}: {job.description}" for job in scheduled_trades])
+        output_lines.append(f"\nTotal scheduled: {len(scheduled_trades)}")
 
     return "\n".join(output_lines)
 
 
 @mcp.tool()
 async def cancel_scheduled_trade(ctx: Context, job_id: str) -> str:
-    """Cancel a trade that is currently queued via its Job ID."""
+    """Cancel a trade that is currently scheduled via its Job ID.
+    Only works for trades scheduled while the market was closed.
+    """
     try:
         lifespan_ctx: ServerContext = ctx.request_context.lifespan_context
-        # Access state via attributes
         pending_trades = lifespan_ctx.pending_trades
-    except AttributeError: # More specific exception
-        logger.error("Lifespan context (ServerContext) not accessible via ctx.request_context.lifespan_context.")
+    except AttributeError:
         return "Error: Trade scheduling system state not accessible."
 
     job = pending_trades.get(job_id)
-    if not job: return f"Error: Job ID '{job_id}' not found."
-    if job.status != "queued": return f"Error: Job '{job_id}' cannot be cancelled. Status: {job.status}."
-    job.status = "cancelled"
-    logger.info(f"Marked job {job_id} ('{job.description}') as cancelled.")
-    return f"Trade job {job_id} ('{job.description}') has been marked for cancellation."
+
+    if not job:
+        return f"Error: Job ID '{job_id}' not found."
+
+    # Check current status before attempting cancellation
+    if job.status == "cancelled":
+        return f"Job {job_id} ('{job.description}') is already cancelled."
+    if job.status == "completed":
+        return f"Error: Job {job_id} ('{job.description}') has already completed."
+    if job.status == "failed":
+        return f"Error: Job {job_id} ('{job.description}') has already failed."
+    if job.status == "processing":
+        return f"Error: Job {job_id} ('{job.description}') is already processing and cannot be cancelled."
+    if job.status == "cancelling":
+        return f"Job {job_id} ('{job.description}') is already being cancelled."
+
+    # Only allow cancellation if the job is currently scheduled (and has a task)
+    if job.status == "scheduled":
+        task_to_cancel = job.execution_task
+        if task_to_cancel and not task_to_cancel.done():
+            try:
+                job.status = "cancelling" # Mark as cancelling first
+                task_to_cancel.cancel()
+                # Wait briefly for the cancellation to be processed by the task wrapper
+                await asyncio.sleep(0.1)
+                # The task wrapper should update the status to "cancelled"
+                if job.status == "cancelling": # If wrapper hasn't updated yet, force it
+                     job.status = "cancelled"
+                     job.execution_task = None
+                return f"Trade job {job_id} ('{job.description}') has been cancelled."
+            except Exception as e:
+                # Revert status if cancellation failed unexpectedly
+                job.status = "scheduled"
+                return f"Error cancelling task for job {job_id}: {str(e)}"
+        else:
+            # Task doesn't exist or is already done, but status is scheduled? Inconsistent state.
+            job.status = "failed" # Mark as failed due to inconsistency
+            return f"Error: Job {job_id} is in state 'scheduled' but has no active execution task to cancel."
+    else:
+        # Should be unreachable due to checks above, but acts as a safeguard
+        return f"Error: Job '{job_id}' cannot be cancelled. Status: {job.status}."
 
 @mcp.tool()
 async def plot_nlv_history(
@@ -323,7 +314,7 @@ async def plot_nlv_history(
         from . import chart_server
 
         # Get portfolio history data
-        history = tastytrade_api.get_nlv_history(time_back=time_back)
+        history = tastytrade_client.get_nlv_history(time_back=time_back)
         if not history or len(history) == 0:
             return "No history data available for the selected time period."
 
@@ -333,7 +324,7 @@ async def plot_nlv_history(
                 chart_url = await chart_server.create_nlv_chart(history, time_back)
                 return f"View your portfolio chart here:\n{chart_url}\n\nPortfolio value history for the past {time_back} is now available in your browser."
             except Exception as e:
-                logger.error(f"Error with web chart: {e}", exc_info=True)
+                logger.error(f"Chart server encountered an error: {str(e)}")
                 return f"Unable to display chart in web browser. The chart data has been processed but the web server encountered an error: {str(e)}"
 
         # Otherwise generate base64 image for direct display
@@ -358,14 +349,14 @@ async def plot_nlv_history(
 
         return base64_str
     except Exception as e:
-        logger.error(f"Error in plot_nlv_history: {e}", exc_info=True)
+        logger.exception("Error generating plot")
         return f"Error generating plot: {str(e)}"
 
 @mcp.tool()
 async def get_account_balances() -> str:
     """Retrieve current account cash balance, buying power, and net liquidating value."""
     try:
-        balances = await tastytrade_api.get_balances()
+        balances = await tastytrade_client.get_balances()
         return (
             f"Account Balances:\n"
             f"Cash Balance: ${balances.cash_balance:,.2f}\n"
@@ -374,14 +365,14 @@ async def get_account_balances() -> str:
             f"Maintenance Excess: ${balances.maintenance_excess:,.2f}"
         )
     except Exception as e:
-        logger.error(f"Error in get_account_balances: {e}")
+        logger.exception("Error fetching balances")
         return f"Error fetching balances: {str(e)}"
 
 @mcp.tool()
 async def get_open_positions() -> str:
     """List all currently open stock and option positions with current values."""
     try:
-        positions = await tastytrade_api.get_positions()
+        positions = await tastytrade_client.get_positions()
         if not positions:
             return "No open positions found."
 
@@ -399,15 +390,15 @@ async def get_open_positions() -> str:
                     f"${float(pos.mark_price or 0):,.2f}",
                     f"${value:,.2f}"
                 ])
-            except Exception as e:
-                logger.error(f"Error processing position {pos.symbol}: {e}")
+            except Exception:
+                logger.warning("Skipping position due to processing error: %s", pos.symbol, exc_info=True)
                 continue
 
         output = ["Current Positions:", ""]
         output.append(tabulate(table_data, headers=headers, tablefmt="plain"))
         return "\n".join(output)
     except Exception as e:
-        logger.error(f"Error in get_open_positions: {e}")
+        logger.exception("Error fetching positions")
         return f"Error fetching positions: {str(e)}"
 
 @mcp.tool()
@@ -423,7 +414,7 @@ def get_transaction_history(start_date: str | None = None) -> str:
             except ValueError:
                 return "Invalid date format. Please use YYYY-MM-DD (e.g., '2024-01-01')"
 
-        transactions = tastytrade_api.get_transaction_history(start_date=date_obj)
+        transactions = tastytrade_client.get_transaction_history(start_date=date_obj)
         if not transactions:
             return "No transactions found for the specified period."
 
@@ -442,13 +433,14 @@ def get_transaction_history(start_date: str | None = None) -> str:
         output.append(tabulate(table_data, headers=headers, tablefmt="plain"))
         return "\n".join(output)
     except Exception as e:
+        logger.exception("Error fetching transaction history")
         return f"Error fetching transactions: {str(e)}"
 
 @mcp.tool()
 async def get_metrics(symbols: list[str]) -> str:
     """Get market metrics for symbols (IV Rank, Beta, Liquidity, Earnings)."""
     try:
-        metrics_data = await tastytrade_api.get_market_metrics(symbols)
+        metrics_data = await tastytrade_client.get_market_metrics(symbols)
         if not metrics_data:
             return "No metrics found for the specified symbols."
 
@@ -481,15 +473,15 @@ async def get_metrics(symbols: list[str]) -> str:
                     earnings_info
                 ]
                 table_data.append(row)
-            except Exception as e:
-                logger.error(f"Error processing metrics for {m.symbol}: {e}")
+            except Exception:
+                logger.warning("Skipping metric for symbol due to processing error: %s", m.symbol, exc_info=True)
                 continue
 
         output = ["Market Metrics:", ""]
         output.append(tabulate(table_data, headers=headers, tablefmt="plain"))
         return "\n".join(output)
     except Exception as e:
-        logger.error(f"Error in get_metrics: {e}")
+        logger.exception("Error fetching market metrics")
         return f"Error fetching market metrics: {str(e)}"
 
 @mcp.tool()
@@ -514,7 +506,7 @@ async def get_prices(
             except ValueError:
                 return "Invalid expiration date format. Please use YYYY-MM-DD format"
 
-        result = await tastytrade_api.get_prices(underlying_symbol, expiration_date, option_type, strike)
+        result = await tastytrade_client.get_prices(underlying_symbol, expiration_date, option_type, strike)
         if isinstance(result, tuple):
             bid, ask = result
             return (
@@ -524,5 +516,5 @@ async def get_prices(
             )
         return result
     except Exception as e:
-        logger.error(f"Error in get_prices for {underlying_symbol}: {e}")
+        logger.exception("Error getting prices")
         return f"Error getting prices: {str(e)}"

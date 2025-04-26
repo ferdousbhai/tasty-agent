@@ -15,7 +15,7 @@ from tastytrade.dxfeed import Quote
 
 logger = logging.getLogger(__name__)
 
-class TastytradeAPI:
+class TastytradeClient:
     def __init__(self) -> None:
         # Session management
         self._session: Session | None = None
@@ -221,18 +221,6 @@ class TastytradeAPI:
     def replace_order(self, order_id: str, new_order: NewOrder) -> PlacedOrder:
         """Replace an existing order."""
         return self.account.replace_order(self.session, order_id, new_order)
-
-    def get_equity(self, symbol: str) -> Equity:
-        """Get equity instrument."""
-        return Equity.get_equity(self.session, symbol)
-
-    def get_option(self, symbol: str) -> Option:
-        """Get option instrument."""
-        return Option.get_option(self.session, symbol)
-
-    def get_option_chain(self, symbol: str) -> list[NestedOptionChain]:
-        """Get option chain."""
-        return NestedOptionChain.get_chain(self.session, symbol)
 
     # Singleton pattern
     _instance: Self | None = None
