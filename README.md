@@ -45,72 +45,66 @@ If credentials are found in both the keyring and environment variables, the keyr
 #### Portfolio Management
 
 1. `plot_nlv_history`
-   - Plots account net liquidating value history over time
+   - Plots account net liquidating value history.
    - Input:
-     - `time_back` (string): Time period to plot ('1d', '1m', '3m', '6m', '1y', 'all')
-   - Returns: Base64-encoded PNG image of the generated plot
+     - `time_back` (string): Time period ('1d', '1m', '3m', '6m', '1y', 'all', default '1y').
+     - `show_web` (boolean): Display in web browser (default: True).
+   - Returns: Clickable URL to the chart (if `show_web=True`) or Base64-encoded PNG image.
 
 2. `get_account_balances`
-   - Get current account balances
-   - Returns: Formatted string with cash balance, buying power, net liquidating value, and maintenance excess
-   - Example response: `"Cash: $5,000.00, Buying Power: $10,000.00, NLV: $15,000.00"`
+   - Get current account balances.
+   - Returns: Formatted string with cash balance, derivative buying power, net liquidating value, and maintenance excess.
 
 3. `get_open_positions`
-   - Get all currently open positions
-   - Returns: Formatted table showing Symbol, Position Type, Quantity, Mark Price, and Current Value
+   - Get all currently open positions.
+   - Returns: Formatted table showing Symbol, Type, Quantity, Mark Price, and Value.
 
 4. `get_transaction_history`
-   - Get transaction history
+   - Get transaction history.
    - Input:
-     - `start_date` (string, optional): Start date in YYYY-MM-DD format. Defaults to last 90 days if not provided.
-   - Returns: Formatted table showing Transaction Date, Transaction Type, Description, and Value
+     - `start_date` (string, optional): Start date in YYYY-MM-DD format. Defaults to last 90 days.
+   - Returns: Formatted table showing Date, Sub Type, Description, and Value.
 
 #### Trade Management
 
 1. `schedule_trade`
-   - Schedule a trade for execution
+   - Schedules a stock/option trade for immediate or next-market-open execution. Uses a lock for sequential processing.
    - Inputs:
-     - `action` (string): "Buy to Open" or "Sell to Close"
-     - `quantity` (integer): Number of shares/contracts
-     - `underlying_symbol` (string): The underlying stock symbol (e.g., "SPY", "AAPL")
-     - `strike` (float, optional): For options only - strike price
-     - `option_type` (string, optional): For options only - "C" for calls, "P" for puts
-     - `expiration_date` (string, optional): For options only - expiration date in YYYY-MM-DD format
-     - `dry_run` (boolean): Simulate without executing (default: False)
-   - Returns: Task ID and confirmation message
-   - Notes:
-     - Trades execute immediately during market hours
-     - Trades during market closure are automatically scheduled for next market open
+     - `action` (string): "Buy to Open" or "Sell to Close".
+     - `quantity` (integer): Number of shares/contracts.
+     - `underlying_symbol` (string): The underlying stock symbol.
+     - `strike` (float, optional): Option strike price.
+     - `option_type` (string, optional): "C" for calls, "P" for puts.
+     - `expiration_date` (string, optional): Option expiration date in YYYY-MM-DD format.
+     - `dry_run` (boolean): Simulate without executing (default: False).
+   - Returns: Message indicating immediate execution result (success/failure) or confirmation that the trade is scheduled (with Job ID).
 
 2. `list_scheduled_trades`
-   - List all pending scheduled trades
-   - Returns: Formatted table showing:
-     - Position: Order in queue
-     - ID: Unique task identifier
-     - Action: Buy to Open or Sell to Close
-     - Instrument: Symbol and option details if applicable
-     - Quantity: Number of shares/contracts
-     - Status: Time until execution or current status
+   - List trades currently scheduled (waiting for market open/lock) or actively processing.
+   - Returns: Formatted string listing Job ID and description for each relevant trade.
 
-3. `remove_scheduled_trade`
-   - Remove a scheduled trade
+3. `cancel_scheduled_trade`
+   - Cancel a trade previously scheduled for future execution (status must be 'scheduled').
    - Input:
-     - `task_id` (string): ID of task to remove
-   - Returns: Confirmation message
+     - `job_id` (string): ID of the scheduled job to cancel.
+   - Returns: Confirmation or error message.
 
 #### Market Analysis
 
 1. `get_metrics`
-   - Get market metrics for specified symbols
+   - Get market metrics for specified symbols.
    - Input:
-     - `symbols` (string[]): List of stock symbols
-   - Returns: Formatted table showing IV Rank, IV Percentile, Beta, Liquidity Rating, and Next Earnings Date/Time (when available)
+     - `symbols` (list[string]): List of stock symbols.
+   - Returns: Formatted table showing IV Rank, IV Percentile, Beta, Liquidity Rating, Lendability, and Earnings info (when available).
 
 2. `get_prices`
-   - Get current bid and ask prices
+   - Get current bid/ask prices for a stock or a specific option contract.
    - Input:
-     - `symbol` (string): Stock or option symbol
-   - Returns: Current bid and ask prices
+     - `underlying_symbol` (string): Stock ticker symbol.
+     - `expiration_date` (string, optional): Option expiry in YYYY-MM-DD format.
+     - `option_type` (string, optional): "C" for Call, "P" for Put.
+     - `strike` (float, optional): Option strike price.
+   - Returns: Formatted string with current bid and ask prices, or an error message.
 
 ## Usage with Claude Desktop
 
