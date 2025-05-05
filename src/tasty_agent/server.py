@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from tabulate import tabulate
 from contextlib import asynccontextmanager
 import logging
+from zoneinfo import ZoneInfo
 
 from mcp.server.fastmcp import FastMCP, Context
 
@@ -142,8 +143,9 @@ async def schedule_trade(
             # Market is closed, schedule delayed execution
             next_market_open = get_next_market_open()
             time_until = format_time_until(next_market_open)
-            now_local = datetime.now().astimezone()
-            wait_seconds = max(0, (next_market_open - now_local).total_seconds()) + 30 # Add buffer
+            # Ensure consistent timezone for comparison
+            now_ny = datetime.now(ZoneInfo('America/New_York'))
+            wait_seconds = max(0, (next_market_open - now_ny).total_seconds()) + 30 # Add buffer
 
             async def run_scheduled_trade(run_job_id: str, run_params: dict):
                 """Task body: Waits for market open, checks status, then calls execute_trade."""
@@ -297,60 +299,55 @@ async def cancel_scheduled_trade(ctx: Context, job_id: str) -> str:
         return f"Error: Job '{job_id}' cannot be cancelled. Status: {job.status}."
 
 @mcp.tool()
-async def plot_nlv_history(
-    time_back: Literal['1d', '1m', '3m', '6m', '1y', 'all'] = '1y',
-    show_web: bool = True
+async def get_nlv_history(
+    time_back: Literal['1d', '1m', '3m', '6m', '1y', 'all'] = '1y'
 ) -> str:
-    """Generate a plot of account value history and display it via web browser.
+    """Get Net Liquidating Value (NLV) history for the account.
 
-    When show_web=True, this function returns a clickable URL.
-    Please return this URL to the user so that they can click it to view the chart in their browser.
+    Returns the data as a formatted table with Date, Open, High, Low, and Close columns.
 
     Args:
-        time_back: Time period to plot (1d=1 day, 1m=1 month, 3m=3 months, 6m=6 months, 1y=1 year, all=all time)
-        show_web: Whether to display the plot in a web browser (default: True)
+        time_back: Time period for history (1d=1 day, 1m=1 month, 3m=3 months, 6m=6 months, 1y=1 year, all=all time)
     """
     try:
-        from . import chart_server
-
-        # Get portfolio history data
+        # Get portfolio history data directly from the client
         history = tastytrade_client.get_nlv_history(time_back=time_back)
         if not history or len(history) == 0:
             return "No history data available for the selected time period."
 
-        # If web display is requested, use the chart server
-        if show_web:
-            try:
-                chart_url = await chart_server.create_nlv_chart(history, time_back)
-                return f"View your portfolio chart here:\n{chart_url}\n\nPortfolio value history for the past {time_back} is now available in your browser."
-            except Exception as e:
-                logger.error(f"Chart server encountered an error: {str(e)}")
-                return f"Unable to display chart in web browser. The chart data has been processed but the web server encountered an error: {str(e)}"
+        # Format the data into a table
+        headers = ["Date", "Open ($)", "High ($)", "Low ($)", "Close ($)"]
+        # Store tuples of (date_object, formatted_date, open_str, high_str, low_str, close_str) for sorting
+        parsed_data = []
+        for n in history:
+            # Parse the date part of the time string (first 10 chars)
+            date_part = n.time[:10]
+            sort_key_date = datetime.strptime(date_part, "%Y-%m-%d").date()
 
-        # Otherwise generate base64 image for direct display
-        import io
-        import base64
-        import matplotlib
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
+            # Format the date and OHLC values (using total_* fields)
+            formatted_date = sort_key_date.strftime("%Y-%m-%d")
+            open_str = f"{float(n.total_open):,.2f}"
+            high_str = f"{float(n.total_high):,.2f}"
+            low_str = f"{float(n.total_low):,.2f}"
+            close_str = f"{float(n.total_close):,.2f}" # Use total_close for NLV
+            parsed_data.append((sort_key_date, formatted_date, open_str, high_str, low_str, close_str))
 
-        fig, ax = plt.subplots(figsize=(10, 6))
-        ax.plot([n.time for n in history], [n.close for n in history], 'b-')
-        ax.set_title(f'Portfolio Value History (Past {time_back})')
-        ax.set_xlabel('Date')
-        ax.set_ylabel('Portfolio Value ($)')
-        ax.grid(True)
+        # Sort by date object descending (most recent first)
+        parsed_data.sort(key=lambda item: item[0], reverse=True)
 
-        buffer = io.BytesIO()
-        fig.savefig(buffer, format='png')
-        buffer.seek(0)
-        base64_str = base64.b64encode(buffer.read()).decode('utf-8')
-        plt.close(fig)
+        # Format for tabulate *after* sorting
+        table_data = [
+            [formatted_date, open_str, high_str, low_str, close_str]
+            for sort_key_date, formatted_date, open_str, high_str, low_str, close_str in parsed_data
+        ]
 
-        return base64_str
+        output = [f"Net Liquidating Value History (Past {time_back}):", ""]
+        output.append(tabulate(table_data, headers=headers, tablefmt="plain"))
+        return "\n".join(output)
+
     except Exception as e:
-        logger.exception("Error generating plot")
-        return f"Error generating plot: {str(e)}"
+        logger.exception("Error getting NLV history")
+        return f"Error getting NLV history: {str(e)}"
 
 @mcp.tool()
 async def get_account_balances() -> str:

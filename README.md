@@ -44,12 +44,11 @@ If credentials are found in both the keyring and environment variables, the keyr
 
 #### Portfolio Management
 
-1. `plot_nlv_history`
-   - Plots account net liquidating value history.
+1. `get_nlv_history`
+   - Gets account net liquidating value (NLV) history.
    - Input:
      - `time_back` (string): Time period ('1d', '1m', '3m', '6m', '1y', 'all', default '1y').
-     - `show_web` (boolean): Display in web browser (default: True).
-   - Returns: Clickable URL to the chart (if `show_web=True`) or Base64-encoded PNG image.
+   - Returns: Formatted table with Date and Value columns.
 
 2. `get_account_balances`
    - Get current account balances.

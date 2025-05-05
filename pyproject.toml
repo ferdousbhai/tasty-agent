@@ -1,18 +1,15 @@
 [project]
 name = "tasty-agent"
-version = "0.1.7"
+version = "0.1.8"
 description = "A Model Context Protocol server for interacting with TastyTrade brokerage accounts"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "keyring",
-    "matplotlib",
     "mcp[cli]>=1.6.0",
     "tastytrade>=9.7",
     "exchange-calendars>=4.8",
     "tabulate>=0.9.0",
-    "fastapi>=0.115.12",
-    "uvicorn>=0.34.0",
 ]
 authors = [{ name = "Ferdous", email = "ferdous@hey.com" }]
 keywords = ["tastytrade", "trading", "mcp", "model context protocol", "broker", "robinhood", "wallstreetbets"]
