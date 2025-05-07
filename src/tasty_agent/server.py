@@ -44,12 +44,6 @@ class ServerContext:
 @asynccontextmanager
 async def lifespan(server: FastMCP) -> AsyncIterator[ServerContext]:
     """Manages the trade state, lock, and Tastytrade session lifecycle."""
-    pending_trades = {}
-    trade_execution_lock = asyncio.Lock()
-    tasty_session: Session | None = None
-    tasty_account: Account | None = None
-    context = None
-
     try:
         username = keyring.get_password("tastytrade", "username") or os.getenv("TASTYTRADE_USERNAME")
         password = keyring.get_password("tastytrade", "password") or os.getenv("TASTYTRADE_PASSWORD")
@@ -62,11 +56,7 @@ async def lifespan(server: FastMCP) -> AsyncIterator[ServerContext]:
             )
 
         tasty_session = Session(username, password)
-        if not tasty_session:
-            raise ValueError("Failed to create Tastytrade session.")
         accounts = Account.get(tasty_session)
-        if not accounts:
-            raise ValueError("No Tastytrade accounts found for the user.")
 
         if account_id:
             tasty_account = next((acc for acc in accounts if acc.account_number == account_id), None)
@@ -80,44 +70,26 @@ async def lifespan(server: FastMCP) -> AsyncIterator[ServerContext]:
                 logger.info(f"Using Tastytrade account: {tasty_account.account_number}")
 
         context = ServerContext(
-            pending_trades=pending_trades,
-            trade_execution_lock=trade_execution_lock,
+            pending_trades={},
+            trade_execution_lock=asyncio.Lock(),
             session=tasty_session,
             account=tasty_account,
         )
 
         yield context
 
-    except Exception as e:
-        logger.exception(f"Error during Tastytrade session initialization in lifespan: {e}")
-        # If initialization fails, create a context with None session/account
-        # to allow the server to start but tools will fail gracefully.
-        if context is None: # Ensure context exists even if yield wasn't reached
-            context = ServerContext(
-                pending_trades=pending_trades,
-                trade_execution_lock=trade_execution_lock,
-                session=None,
-                account=None,
-            )
-        context.session = None
-        context.account = None
-        yield context # Yield the partially failed context so server can run
-
     finally:
         logger.info("Cleaning up lifespan resources...")
-        if context: # Check if context was successfully created at some point
-            # Cancel any pending trade tasks on shutdown
+        if context:
             tasks_to_cancel = [
                 job.execution_task for job in context.pending_trades.values()
                 if job.execution_task and not job.execution_task.done()
             ]
             if tasks_to_cancel:
-                logger.info(f"Cancelling {len(tasks_to_cancel)} pending trade tasks...")
                 for task in tasks_to_cancel:
                     task.cancel()
                 await asyncio.gather(*tasks_to_cancel, return_exceptions=True) # Wait for cancellations
-                logger.info("Pending trade tasks cancelled.")
-        # Session cleanup (logout) happens automatically when Session object is GC'd
+                logger.info(f"{len(tasks_to_cancel)} pending trade tasks cancelled.")
 
 
 mcp = FastMCP("TastyTrade", lifespan=lifespan)
@@ -134,59 +106,51 @@ async def _create_instrument(
     """(Helper) Create an instrument object for a given symbol."""
     # If no option parameters, treat as equity
     if not any([expiration_date, option_type, strike]):
-        try:
-             return await Equity.a_get_equity(session, underlying_symbol)
-        except Exception as e:
-            logger.error(f"Failed to get equity {underlying_symbol}: {e}")
-            return None
+        return await Equity.a_get(session, underlying_symbol)
 
     # Validate all option parameters are present
     if not all([expiration_date, option_type, strike]):
+
         logger.error("Must provide all option parameters (expiration_date, option_type, strike) or none")
         return None
 
-    try:
-        # Get option chain
-        chain: list[NestedOptionChain] = await NestedOptionChain.a_get_chain(session, underlying_symbol)
-        if not chain:
-            logger.error(f"No option chain found for {underlying_symbol}")
-            return None
-        option_chain = chain[0]
+    # Get option chain
+    chain: list[NestedOptionChain] = await NestedOptionChain.a_get(session, underlying_symbol)
+    if not chain:
+        logger.error(f"No option chain found for {underlying_symbol}")
+        return None
+    option_chain = chain[0]
 
-        # Find matching expiration
-        exp_date = expiration_date.date()
-        expiration = next(
-            (exp for exp in option_chain.expirations
-            if exp.expiration_date == exp_date),
-            None
-        )
-        if not expiration:
-            logger.error(f"No expiration found for date {exp_date} in chain for {underlying_symbol}")
-            return None
+    # Find matching expiration
+    exp_date = expiration_date.date()
+    expiration = next(
+        (exp for exp in option_chain.expirations
+        if exp.expiration_date == exp_date),
+        None
+    )
+    if not expiration:
+        logger.error(f"No expiration found for date {exp_date} in chain for {underlying_symbol}")
+        return None
 
-        # Find matching strike
-        strike_obj = next(
-            (s for s in expiration.strikes
-            if float(s.strike_price) == strike),
-            None
-        )
-        if not strike_obj:
-            logger.error(f"No strike found for {strike} on {exp_date} in chain for {underlying_symbol}")
-            return None
+    # Find matching strike
+    strike_obj = next(
+        (s for s in expiration.strikes
+        if float(s.strike_price) == strike),
+        None
+    )
+    if not strike_obj:
+        logger.error(f"No strike found for {strike} on {exp_date} in chain for {underlying_symbol}")
+        return None
 
-        # Get option symbol based on type
-        option_symbol = strike_obj.call if option_type == "C" else strike_obj.put
-        return await Option.a_get_option(session, option_symbol)
-    except Exception as e:
-         logger.error(f"Error finding option for {underlying_symbol} {expiration_date.strftime('%Y-%m-%d') if expiration_date else ''} {option_type}{strike}: {e}")
-         return None
+    # Get option symbol based on type
+    option_symbol = strike_obj.call if option_type == "C" else strike_obj.put
+    return await Option.a_get(session, option_symbol)
 
 async def _get_quote(session: Session, streamer_symbol: str) -> tuple[Decimal, Decimal] | str:
     """(Helper) Get current quote for a symbol via DXLinkStreamer."""
     try:
         async with DXLinkStreamer(session) as streamer:
             await streamer.subscribe(Quote, [streamer_symbol])
-            # Get the quote
             quote = await asyncio.wait_for(streamer.get_event(Quote), timeout=10.0)
             return Decimal(str(quote.bid_price)), Decimal(str(quote.ask_price))
     except asyncio.TimeoutError:
@@ -196,10 +160,6 @@ async def _get_quote(session: Session, streamer_symbol: str) -> tuple[Decimal, D
         # Handle WebSocket cancellation explicitly
         logger.warning(f"WebSocket connection interrupted for {streamer_symbol}")
         return f"WebSocket connection interrupted for {streamer_symbol}"
-    except Exception as e:
-        # Catch all other exceptions
-        logger.error(f"Error getting quote for {streamer_symbol}: {str(e)}")
-        return f"Error getting quote for {streamer_symbol}: {str(e)}"
 
 async def _execute_trade_with_monitoring(
     session: Session,
@@ -218,7 +178,6 @@ async def _execute_trade_with_monitoring(
     original_requested_quantity = quantity
 
     try:
-        # --- Instrument Creation --- (Using existing helper)
         expiry_datetime = None
         if expiration_date:
             try:
@@ -239,7 +198,7 @@ async def _execute_trade_with_monitoring(
                 error_msg += f" with expiration {expiration_date}, type {option_type}, strike {strike}"
             raise ValueError(error_msg)
 
-        # --- Price Fetching --- (Using existing helper)
+        # --- Price Fetching ---
         quote_result = await _get_quote(session, instrument.streamer_symbol)
         if not isinstance(quote_result, tuple):
             raise ValueError(f"Failed to get price for {instrument.symbol}: {quote_result}")
@@ -312,19 +271,14 @@ async def _execute_trade_with_monitoring(
         # Catch errors from instrument creation, pricing, or pre-trade checks
         logger.error(f"{log_prefix}{str(setup_or_check_error)}")
         return False, f"Trade setup/check error: {str(setup_or_check_error)}"
-    except Exception as e:
-        # Catch unexpected errors during setup/checks
-        error_msg = f"Unexpected error during trade setup/checks for {underlying_symbol}: {str(e)}"
-        logger.exception(f"{log_prefix}{error_msg}")
-        return False, error_msg
 
     # --- Order Placement with Retry Logic --- (Adapted from place_trade)
     max_placement_retries = 10
     placed_order_response = None
-    final_quantity = quantity # Track the quantity that gets successfully placed
+    final_quantity = quantity
 
     for attempt in range(max_placement_retries + 1):
-        current_attempt_quantity = quantity # Use temp variable for quantity in this attempt
+        current_attempt_quantity = quantity
 
         if current_attempt_quantity <= 0:
             error_msg = f"Cannot place order, quantity reduced to zero during placement attempts (Attempt {attempt+1})."
@@ -353,43 +307,37 @@ async def _execute_trade_with_monitoring(
         )
 
         # Attempt to Place Order
-        try:
-            response = await account.a_place_order(session, current_order_details, dry_run=dry_run)
+        response = await account.a_place_order(session, current_order_details, dry_run=dry_run)
 
-            if not response.errors:
-                placed_order_response = response
-                final_quantity = current_attempt_quantity
-                logger.info(f"{log_prefix}Order placement successful for quantity {final_quantity} (ID: {response.order.id if not dry_run and response.order else 'N/A - Dry Run'})")
-                break # Exit placement loop
-            else:
-                is_insufficient_funds_error = any(
-                    "buying power" in str(e).lower() or
-                    "insufficient funds" in str(e).lower() or
-                    "margin requirement" in str(e).lower()
-                    for e in response.errors
+        if not response.errors:
+            placed_order_response = response
+            final_quantity = current_attempt_quantity
+            logger.info(f"{log_prefix}Order placement successful for quantity {final_quantity} (ID: {response.order.id if not dry_run and response.order else 'N/A - Dry Run'})")
+            break # Exit placement loop
+        else:
+            is_insufficient_funds_error = any(
+                "buying power" in str(e).lower() or
+                "insufficient funds" in str(e).lower() or
+                "margin requirement" in str(e).lower()
+                for e in response.errors
+            )
+
+            if (action == "Buy to Open" and
+                is_insufficient_funds_error and
+                quantity > 1 and
+                attempt < max_placement_retries):
+                quantity -= 1
+                logger.warning(
+                    f"{log_prefix}Placement failed likely due to funds/fees. Errors: {response.errors}. "
+                    f"Reducing quantity to {quantity} and retrying."
                 )
-
-                if (action == "Buy to Open" and
-                    is_insufficient_funds_error and
-                    quantity > 1 and
-                    attempt < max_placement_retries):
-                    quantity -= 1
-                    logger.warning(
-                        f"{log_prefix}Placement failed likely due to funds/fees. Errors: {response.errors}. "
-                        f"Reducing quantity to {quantity} and retrying."
-                    )
-                    await asyncio.sleep(0.5) # Small delay
-                    continue
-                else:
-                    error_msg = (f"Order placement failed permanently (Attempt {attempt+1}):\n"
-                                 + "\n".join(str(error) for error in response.errors))
-                    logger.error(f"{log_prefix}{error_msg}")
-                    return False, error_msg
-
-        except Exception as e:
-             error_msg = f"Exception during order placement attempt {attempt+1}: {str(e)}"
-             logger.exception(f"{log_prefix}{error_msg}")
-             return False, error_msg
+                await asyncio.sleep(0.5) # Small delay
+                continue
+            else:
+                error_msg = (f"Order placement failed permanently (Attempt {attempt+1}):\n"
+                             + "\n".join(str(error) for error in response.errors))
+                logger.error(f"{log_prefix}{error_msg}")
+                return False, error_msg
 
     # After Placement Loop
     if not placed_order_response:
@@ -429,84 +377,66 @@ async def _execute_trade_with_monitoring(
     for fill_attempt in range(20):
         await asyncio.sleep(15.0)
 
+        live_orders = await account.a_get_live_orders(session)
+        order = next((o for o in live_orders if o.id == current_order.id), None)
+
+        if not order:
+            error_msg = f"Order {current_order.id} not found during monitoring. It might have filled or been cancelled."
+            logger.warning(f"{log_prefix}{error_msg}")
+            return False, error_msg # Treat as failure/uncertainty
+
+        if order.status == OrderStatus.FILLED:
+            success_msg = f"Order {order.id} filled successfully (Qty: {final_quantity})"
+            logger.info(f"{log_prefix}{success_msg}")
+            # Invalidate cache on success
+            return True, success_msg
+
+        if order.status not in (OrderStatus.LIVE, OrderStatus.RECEIVED):
+            error_msg = f"Order {order.id} entered unexpected status during monitoring: {order.status}"
+            logger.error(f"{log_prefix}{error_msg}")
+            return False, error_msg # Terminal failure
+
+        # Adjust Price if Still Live
+        if not final_leg:
+             logger.warning(f"{log_prefix}Cannot adjust order {order.id}, failed to build final leg earlier.")
+             continue # Skip adjustment for this attempt
+
+        price_delta = Decimal("0.01") if action == "Buy to Open" else Decimal("-0.01")
         try:
-            # Get live orders
-            live_orders = await account.a_get_live_orders(session)
-            order = next((o for o in live_orders if o.id == current_order.id), None)
+             current_price_decimal = Decimal(str(order.price))
+        except Exception:
+             error_msg = f"Could not parse current order price '{order.price}' as Decimal for adjustment."
+             logger.error(f"{log_prefix}{error_msg}")
+             continue # Skip adjustment
 
-            if not order:
-                error_msg = f"Order {current_order.id} not found during monitoring. It might have filled or been cancelled."
-                logger.warning(f"{log_prefix}{error_msg}")
-                # Invalidate? Maybe not here, could be transient. Return success=False for uncertainty.
-                return False, error_msg # Treat as failure/uncertainty
+        new_price_decimal = current_price_decimal + price_delta
+        logger.info(
+            f"{log_prefix}Adjusting order price from ${current_price_decimal:.2f} to ${new_price_decimal:.2f} "
+            f"(Fill Attempt {fill_attempt + 1}/20)"
+        )
 
-            if order.status == OrderStatus.FILLED:
-                success_msg = f"Order {order.id} filled successfully (Qty: {final_quantity})"
-                logger.info(f"{log_prefix}{success_msg}")
-                # Invalidate cache on success
-                # Consider adding invalidate_positions/balances if needed later
-                return True, success_msg
+        replacement_order_details = NewOrder(
+            time_in_force=OrderTimeInForce.DAY,
+            order_type=OrderType.LIMIT,
+            legs=[final_leg],
+            price=new_price_decimal * (-1 if action == "Buy to Open" else 1)
+        )
 
-            if order.status not in (OrderStatus.LIVE, OrderStatus.RECEIVED):
-                error_msg = f"Order {order.id} entered unexpected status during monitoring: {order.status}"
-                logger.error(f"{log_prefix}{error_msg}")
-                return False, error_msg # Terminal failure
-
-            # Adjust Price if Still Live
-            if not final_leg:
-                 logger.warning(f"{log_prefix}Cannot adjust order {order.id}, failed to build final leg earlier.")
-                 continue # Skip adjustment for this attempt
-
-            price_delta = Decimal("0.01") if action == "Buy to Open" else Decimal("-0.01")
-            try:
-                 current_price_decimal = Decimal(str(order.price))
-            except Exception:
-                 error_msg = f"Could not parse current order price '{order.price}' as Decimal for adjustment."
-                 logger.error(f"{log_prefix}{error_msg}")
-                 continue # Skip adjustment
-
-            new_price_decimal = current_price_decimal + price_delta
-            logger.info(
-                f"{log_prefix}Adjusting order price from ${current_price_decimal:.2f} to ${new_price_decimal:.2f} "
-                f"(Fill Attempt {fill_attempt + 1}/20)"
-            )
-
-            replacement_order_details = NewOrder(
-                time_in_force=OrderTimeInForce.DAY,
-                order_type=OrderType.LIMIT,
-                legs=[final_leg],
-                price=new_price_decimal * (-1 if action == "Buy to Open" else 1)
-            )
-
-            try:
-                # Replace order
-                replace_response = await account.a_replace_order(session, order.id, replacement_order_details)
-                if replace_response.errors:
-                    error_msg = f"Failed to adjust order {order.id}: {replace_response.errors}"
-                    logger.error(f"{log_prefix}{error_msg}")
-                else:
-                     # Update reference if replacement creates a new order state/id (though unlikely)
-                     current_order = replace_response.order or current_order
-
-            except Exception as e:
-                 error_msg = f"Exception during order replacement for {order.id}: {str(e)}"
-                 logger.exception(f"{log_prefix}{error_msg}")
-
-        except Exception as monitor_loop_error:
-            # Catch errors within the monitoring loop itself (e.g., get_live_orders failure)
-            logger.exception(f"{log_prefix}Error during order monitoring loop (Attempt {fill_attempt + 1}): {monitor_loop_error}")
-            await asyncio.sleep(5) # Shorter sleep after error
+        replace_response = await account.a_replace_order(session, order.id, replacement_order_details)
+        if replace_response.errors:
+            error_msg = f"Failed to adjust order {order.id}: {replace_response.errors}"
+            logger.error(f"{log_prefix}{error_msg}")
+        else:
+             # Update reference if replacement creates a new order state/id (though unlikely)
+             current_order = replace_response.order or current_order
 
     # Monitoring Loop Completed Without Fill
     final_msg = f"Order {current_order.id} not filled after 20 price adjustments. Attempting cancellation."
     logger.warning(f"{log_prefix}{final_msg}")
 
     # Attempt to delete the lingering order
-    try:
-        delete_result = await account.a_delete_order(session, current_order.id)
-        logger.info(f"{log_prefix}Lingering order {current_order.id} cancellation result: {delete_result}")
-    except Exception as e:
-        logger.error(f"{log_prefix}Failed to delete lingering order {current_order.id}: {str(e)}")
+    delete_result = await account.a_delete_order(session, current_order.id)
+    logger.info(f"{log_prefix}Lingering order {current_order.id} cancellation result: {delete_result}")
 
     return False, final_msg # Return False because the trade did not fill
 
@@ -536,12 +466,9 @@ async def schedule_trade(
         expiration_date: Option expiry in YYYY-MM-DD format (if option)
         dry_run: Test without executing if True
     """
-    try:
-        lifespan_ctx: ServerContext = ctx.request_context.lifespan_context
-        pending_trades = lifespan_ctx.pending_trades
-        trade_execution_lock = lifespan_ctx.trade_execution_lock
-    except AttributeError:
-        return "Error: Trade scheduling system state not accessible."
+    lifespan_ctx: ServerContext = ctx.request_context.lifespan_context
+    pending_trades = lifespan_ctx.pending_trades
+    trade_execution_lock = lifespan_ctx.trade_execution_lock
 
     try:
         if expiration_date:
@@ -675,12 +602,7 @@ async def cancel_scheduled_trade(ctx: Context, job_id: str) -> str:
     """Cancel a trade that is currently scheduled via its Job ID.
     Only works for trades scheduled while the market was closed.
     """
-    try:
-        lifespan_ctx: ServerContext = ctx.request_context.lifespan_context
-        pending_trades = lifespan_ctx.pending_trades
-    except AttributeError:
-        return "Error: Trade scheduling system state not accessible."
-
+    pending_trades = ctx.request_context.lifespan_context.pending_trades
     job = pending_trades.get(job_id)
 
     if not job:
@@ -727,38 +649,31 @@ async def cancel_scheduled_trade(ctx: Context, job_id: str) -> str:
 @mcp.tool()
 async def list_scheduled_trades(ctx: Context) -> str:
     """Lists currently scheduled or processing trades (Job ID and description)."""
+    pending_trades_values = ctx.request_context.lifespan_context.pending_trades.values()
 
-    try:
-        lifespan_ctx: ServerContext = ctx.request_context.lifespan_context
-        pending_trades = lifespan_ctx.pending_trades
-    except AttributeError:
-        return "Error: Trade scheduling system state not accessible."
-
-
-    scheduled_trades = sorted(
-        [job for job in pending_trades.values() if job.status == 'scheduled'],
+    processing_jobs = [job for job in pending_trades_values if job.status == 'processing']
+    scheduled_trades_list = sorted(
+        [job for job in pending_trades_values if job.status == 'scheduled'],
         key=lambda j: j.created_at
     )
-    processing_jobs = [
-        job for job in pending_trades.values() if job.status == 'processing'
-    ]
 
-    if not scheduled_trades and not processing_jobs:
-         return "No trades are currently scheduled or being processed."
+    if not processing_jobs and not scheduled_trades_list:
+        return "No trades are currently scheduled or being processed."
 
-    output_lines = []
+    output_sections = []
+
     if processing_jobs:
-         # Should ideally only be one processing due to the lock, but list just in case
-         output_lines.append("Currently processing:")
-         output_lines.extend([f"- Job {job.job_id}: {job.description}" for job in processing_jobs])
-         output_lines.append("")
+        current_section_lines = ["Currently processing:"]
+        current_section_lines.extend(f"- Job {job.job_id}: {job.description}" for job in processing_jobs)
+        output_sections.append("\n".join(current_section_lines))
 
-    if scheduled_trades:
-        output_lines.append("Scheduled Trades (Waiting for Market Open or Execution Slot):")
-        output_lines.extend([f"- Job {job.job_id}: {job.description}" for job in scheduled_trades])
-        output_lines.append(f"\nTotal scheduled: {len(scheduled_trades)}")
+    if scheduled_trades_list:
+        current_section_lines = ["Scheduled Trades (Waiting for Market Open or Execution Slot):"]
+        current_section_lines.extend(f"- Job {job.job_id}: {job.description}" for job in scheduled_trades_list)
+        current_section_lines.append(f"\nTotal scheduled: {len(scheduled_trades_list)}")
+        output_sections.append("\n".join(current_section_lines))
 
-    return "\n".join(output_lines)
+    return "\n\n".join(output_sections)
 
 
 # --- Tools (Data Retrieval - Reverted due to ctx injection bug) ---
@@ -775,49 +690,43 @@ async def get_nlv_history(
     Args:
         time_back: Time period for history (1d=1 day, 1m=1 month, 3m=3 months, 6m=6 months, 1y=1 year, all=all time)
     """
-    try:
-        # Get portfolio history data directly from the client
-        lifespan_ctx: ServerContext = ctx.request_context.lifespan_context
-        if not lifespan_ctx.session or not lifespan_ctx.account:
-             return "Error: Tastytrade session not available. Check server logs."
+    lifespan_ctx: ServerContext = ctx.request_context.lifespan_context
+    if not lifespan_ctx.session or not lifespan_ctx.account:
+         return "Error: Tastytrade session not available. Check server logs."
 
-        history = await lifespan_ctx.account.a_get_net_liquidating_value_history(lifespan_ctx.session, time_back=time_back)
-        if not history or len(history) == 0:
-            return "No history data available for the selected time period."
+    history = await lifespan_ctx.account.a_get_net_liquidating_value_history(lifespan_ctx.session, time_back=time_back)
+    if not history or len(history) == 0:
+        return "No history data available for the selected time period."
 
-        # Format the data into a table
-        headers = ["Date", "Open ($)", "High ($)", "Low ($)", "Close ($)"]
-        # Store tuples of (date_object, formatted_date, open_str, high_str, low_str, close_str) for sorting
-        parsed_data = []
-        for n in history:
-            # Parse the date part of the time string (first 10 chars)
-            date_part = n.time[:10]
-            sort_key_date = datetime.strptime(date_part, "%Y-%m-%d").date()
+    # Format the data into a table
+    headers = ["Date", "Open ($)", "High ($)", "Low ($)", "Close ($)"]
+    # Store tuples of (date_object, formatted_date, open_str, high_str, low_str, close_str) for sorting
+    parsed_data = []
+    for n in history:
+        # Parse the date part of the time string (first 10 chars)
+        date_part = n.time[:10]
+        sort_key_date = datetime.strptime(date_part, "%Y-%m-%d").date()
 
-            # Format the date and OHLC values (using total_* fields)
-            formatted_date = sort_key_date.strftime("%Y-%m-%d")
-            open_str = f"{float(n.total_open):,.2f}"
-            high_str = f"{float(n.total_high):,.2f}"
-            low_str = f"{float(n.total_low):,.2f}"
-            close_str = f"{float(n.total_close):,.2f}" # Use total_close for NLV
-            parsed_data.append((sort_key_date, formatted_date, open_str, high_str, low_str, close_str))
+        # Format the date and OHLC values (using total_* fields)
+        formatted_date = sort_key_date.strftime("%Y-%m-%d")
+        open_str = f"{float(n.total_open):,.2f}"
+        high_str = f"{float(n.total_high):,.2f}"
+        low_str = f"{float(n.total_low):,.2f}"
+        close_str = f"{float(n.total_close):,.2f}" # Use total_close for NLV
+        parsed_data.append((sort_key_date, formatted_date, open_str, high_str, low_str, close_str))
 
-        # Sort by date object descending (most recent first)
-        parsed_data.sort(key=lambda item: item[0], reverse=True)
+    # Sort by date object descending (most recent first)
+    parsed_data.sort(key=lambda item: item[0], reverse=True)
 
-        # Format for tabulate *after* sorting
-        table_data = [
-            [formatted_date, open_str, high_str, low_str, close_str]
-            for sort_key_date, formatted_date, open_str, high_str, low_str, close_str in parsed_data
-        ]
+    # Format for tabulate *after* sorting
+    table_data = [
+        [formatted_date, open_str, high_str, low_str, close_str]
+        for sort_key_date, formatted_date, open_str, high_str, low_str, close_str in parsed_data
+    ]
 
-        output = ["Net Liquidating Value History (Past {time_back}):", ""]
-        output.append(tabulate(table_data, headers=headers, tablefmt="plain"))
-        return "\n".join(output)
-
-    except Exception as e:
-        logger.exception("Error getting NLV history")
-        return f"Error getting NLV history: {str(e)}"
+    output = ["Net Liquidating Value History (Past {time_back}):", ""]
+    output.append(tabulate(table_data, headers=headers, tablefmt="plain"))
+    return "\n".join(output)
 
 @mcp.tool()
 async def get_account_balances(ctx: Context) -> str:
@@ -825,67 +734,51 @@ async def get_account_balances(ctx: Context) -> str:
 
     Note: Net Liquidating Value may be inaccurate when the market is closed.
     """
-    try:
-        lifespan_ctx: ServerContext = ctx.request_context.lifespan_context
-        if not lifespan_ctx.session or not lifespan_ctx.account:
-             return "Error: Tastytrade session not available. Check server logs."
+    lifespan_ctx: ServerContext = ctx.request_context.lifespan_context
+    if not lifespan_ctx.session or not lifespan_ctx.account:
+         return "Error: Tastytrade session not available. Check server logs."
 
-        balances = await lifespan_ctx.account.a_get_balances(lifespan_ctx.session)
-        return (
-            f"Account Balances:\n"
-            f"Cash Balance: ${float(balances.cash_balance):,.2f}\n"
-            f"Equity Buying Power: ${float(balances.equity_buying_power):,.2f}\n"
-            f"Derivative Buying Power: ${float(balances.derivative_buying_power):,.2f}\n"
-            f"Net Liquidating Value: ${float(balances.net_liquidating_value):,.2f}\n"
-            f"Maintenance Excess: ${float(balances.maintenance_excess):,.2f}"
-        )
-    except Exception as e:
-        logger.exception("Error fetching balances")
-        return f"Error fetching balances: {str(e)}"
+    balances = await lifespan_ctx.account.a_get_balances(lifespan_ctx.session)
+    return (
+        f"Account Balances:\n"
+        f"Cash Balance: ${float(balances.cash_balance):,.2f}\n"
+        f"Equity Buying Power: ${float(balances.equity_buying_power):,.2f}\n"
+        f"Derivative Buying Power: ${float(balances.derivative_buying_power):,.2f}\n"
+        f"Net Liquidating Value: ${float(balances.net_liquidating_value):,.2f}\n"
+        f"Maintenance Excess: ${float(balances.maintenance_excess):,.2f}"
+    )
 
 @mcp.tool()
-async def get_open_positions(ctx: Context) -> str:
+async def get_current_positions(ctx: Context) -> str:
     """List all currently open stock and option positions with current values.
 
     Note: Mark price and calculated value may be inaccurate when the market is closed.
     """
-    try:
-        lifespan_ctx: ServerContext = ctx.request_context.lifespan_context
-        if not lifespan_ctx.session or not lifespan_ctx.account:
-             return "Error: Tastytrade session not available. Check server logs."
+    lifespan_ctx: ServerContext = ctx.request_context.lifespan_context
 
-        positions = await lifespan_ctx.account.a_get_positions(lifespan_ctx.session)
-        if not positions:
-            return "No open positions found."
+    positions = await lifespan_ctx.account.a_get_positions(lifespan_ctx.session, include_marks=True)
+    if not positions:
+        return "No open positions found."
 
-        headers = ["Symbol", "Type", "Quantity", "Mark Price", "Value"]
-        table_data = []
+    headers = ["Symbol", "Type", "Quantity", "Mark Price", "Value"]
+    table_data = []
 
-        for pos in positions:
-            try:
-                # Combine calculation and formatting slightly
-                mark_price = Decimal(str(pos.mark_price or '0'))
-                quantity = Decimal(str(pos.quantity or '0')) # Handle potential None quantity
-                multiplier = Decimal(str(pos.multiplier or '1')) # Handle potential None multiplier
-                value = mark_price * quantity * multiplier
+    for pos in positions:
+        try:
+            table_data.append([
+                pos.symbol,
+                pos.instrument_type,
+                pos.quantity,
+                f"${pos.mark_price:,.2f}",
+                f"${pos.mark_price * pos.quantity * pos.multiplier:,.2f}"
+            ])
+        except Exception:
+            logger.warning("Skipping position due to processing error: %s", pos.symbol, exc_info=True)
+            continue
 
-                table_data.append([
-                    pos.symbol,
-                    pos.instrument_type or 'N/A',
-                    f"{pos.quantity}" if pos.quantity is not None else 'N/A',
-                    f"${mark_price:,.2f}",
-                    f"${value:,.2f}"
-                ])
-            except Exception:
-                logger.warning("Skipping position due to processing error: %s", pos.symbol, exc_info=True)
-                continue
-
-        output = ["Current Positions:", ""]
-        output.append(tabulate(table_data, headers=headers, tablefmt="plain"))
-        return "\n".join(output)
-    except Exception as e:
-        logger.exception("Error fetching positions")
-        return f"Error fetching positions: {str(e)}"
+    output = ["Current Positions:", ""]
+    output.append(tabulate(table_data, headers=headers, tablefmt="plain"))
+    return "\n".join(output)
 
 @mcp.tool()
 async def get_transaction_history(
@@ -893,104 +786,88 @@ async def get_transaction_history(
     start_date: str | None = None
 ) -> str:
     """Get account transaction history from start_date (YYYY-MM-DD) or last 90 days (if no date provided)."""
-    try:
-        lifespan_ctx: ServerContext = ctx.request_context.lifespan_context
-        if not lifespan_ctx.session or not lifespan_ctx.account:
-             return "Error: Tastytrade session not available. Check server logs."
+    # Default to 90 days if no date provided
+    if start_date is None:
+        date_obj = date.today() - timedelta(days=90)
+    else:
+        try:
+            date_obj = datetime.strptime(start_date, "%Y-%m-%d").date()
+        except ValueError:
+            return "Invalid date format. Please use YYYY-MM-DD (e.g., '2024-01-01')"
 
-        # Default to 90 days if no date provided
-        if start_date is None:
-            date_obj = date.today() - timedelta(days=90)
-        else:
-            try:
-                date_obj = datetime.strptime(start_date, "%Y-%m-%d").date()
-            except ValueError:
-                return "Invalid date format. Please use YYYY-MM-DD (e.g., '2024-01-01')"
+    lifespan_ctx: ServerContext = ctx.request_context.lifespan_context
+    transactions = await lifespan_ctx.account.a_get_history(lifespan_ctx.session, start_date=date_obj)
+    if not transactions:
+        return "No transactions found for the specified period."
 
-        transactions = await lifespan_ctx.account.a_get_history(lifespan_ctx.session, start_date=date_obj)
-        if not transactions:
-            return "No transactions found for the specified period."
+    headers = ["Date", "Sub Type", "Description", "Value"]
+    table_data = []
 
-        headers = ["Date", "Sub Type", "Description", "Value"]
-        table_data = []
+    for txn in transactions:
+        table_data.append([
+            txn.transaction_date.strftime("%Y-%m-%d"),
+            txn.transaction_sub_type or 'N/A',
+            txn.description or 'N/A',
+            f"${float(txn.net_value):,.2f}" if txn.net_value is not None else 'N/A'
+        ])
 
-        for txn in transactions:
-            table_data.append([
-                txn.transaction_date.strftime("%Y-%m-%d"),
-                txn.transaction_sub_type or 'N/A',
-                txn.description or 'N/A',
-                f"${float(txn.net_value):,.2f}" if txn.net_value is not None else 'N/A'
-            ])
-
-        output = ["Transaction History:", ""]
-        output.append(tabulate(table_data, headers=headers, tablefmt="plain"))
-        return "\n".join(output)
-    except Exception as e:
-        logger.exception("Error fetching transaction history")
-        return f"Error fetching transactions: {str(e)}"
+    output = ["Transaction History:", ""]
+    output.append(tabulate(table_data, headers=headers, tablefmt="plain"))
+    return "\n".join(output)
 
 @mcp.tool()
 async def get_metrics(
     ctx: Context,
     symbols: list[str]
 ) -> str:
-    """Get market metrics for symbols (IV Rank, Beta, Liquidity, Earnings).
-    """
-    try:
-        lifespan_ctx: ServerContext = ctx.request_context.lifespan_context
-        if not lifespan_ctx.session:
-             return "Error: Tastytrade session not available. Check server logs."
+    """Get market metrics for symbols (IV Rank, Beta, Liquidity, Earnings)."""
+    if not isinstance(symbols, list) or not all(isinstance(s, str) for s in symbols):
+        return "Error: Input 'symbols' must be a list of strings."
 
-        # Ensure symbols is a list of strings
-        if not isinstance(symbols, list) or not all(isinstance(s, str) for s in symbols):
-            return "Error: Input 'symbols' must be a list of strings."
+    if not symbols:
+        return "Error: No symbols provided."
 
-        if not symbols:
-             return "Error: No symbols provided."
+    session = ctx.request_context.lifespan_context.session
+    metrics_data = await metrics.a_get_market_metrics(session, symbols)
+    if not metrics_data:
+        return f"No metrics found for the specified symbols: {', '.join(symbols)}"
 
-        metrics_data = await metrics.a_get_market_metrics(lifespan_ctx.session, symbols)
-        if not metrics_data:
-            return f"No metrics found for the specified symbols: {', '.join(symbols)}"
+    headers = ["Symbol", "IV Rank", "IV %ile", "Beta", "Liquidity", "Lendability", "Earnings"]
+    table_data = []
 
-        headers = ["Symbol", "IV Rank", "IV %ile", "Beta", "Liquidity", "Lendability", "Earnings"]
-        table_data = []
+    for m in metrics_data:
+        # Process each metric, skipping any that cause errors
+        try:
+            # Convert values with proper error handling
+            iv_rank = f"{float(m.implied_volatility_index_rank) * 100:.1f}%" if m.implied_volatility_index_rank else "N/A"
+            iv_percentile = f"{float(m.implied_volatility_percentile) * 100:.1f}%" if m.implied_volatility_percentile else "N/A"
+            beta = f"{float(m.beta):.2f}" if m.beta else "N/A"
 
-        for m in metrics_data:
-            # Process each metric, skipping any that cause errors
-            try:
-                # Convert values with proper error handling
-                iv_rank = f"{float(m.implied_volatility_index_rank) * 100:.1f}%" if m.implied_volatility_index_rank else "N/A"
-                iv_percentile = f"{float(m.implied_volatility_percentile) * 100:.1f}%" if m.implied_volatility_percentile else "N/A"
-                beta = f"{float(m.beta):.2f}" if m.beta else "N/A"
+            earnings_info = "N/A"
+            earnings = getattr(m, "earnings", None)
+            if earnings is not None:
+                expected = getattr(earnings, "expected_report_date", None)
+                time_of_day = getattr(earnings, "time_of_day", None)
+                if expected is not None and time_of_day is not None:
+                    earnings_info = f"{expected} ({time_of_day})"
 
-                earnings_info = "N/A"
-                earnings = getattr(m, "earnings", None)
-                if earnings is not None:
-                    expected = getattr(earnings, "expected_report_date", None)
-                    time_of_day = getattr(earnings, "time_of_day", None)
-                    if expected is not None and time_of_day is not None:
-                        earnings_info = f"{expected} ({time_of_day})"
+            row = [
+                m.symbol,
+                iv_rank,
+                iv_percentile,
+                beta,
+                m.liquidity_rating or "N/A",
+                m.lendability or "N/A",
+                earnings_info
+            ]
+            table_data.append(row)
+        except Exception:
+            logger.warning("Skipping metric for symbol due to processing error: %s", m.symbol, exc_info=True)
+            continue
 
-                row = [
-                    m.symbol,
-                    iv_rank,
-                    iv_percentile,
-                    beta,
-                    m.liquidity_rating or "N/A",
-                    m.lendability or "N/A",
-                    earnings_info
-                ]
-                table_data.append(row)
-            except Exception:
-                logger.warning("Skipping metric for symbol due to processing error: %s", m.symbol, exc_info=True)
-                continue
-
-        output = ["Market Metrics:", ""]
-        output.append(tabulate(table_data, headers=headers, tablefmt="plain"))
-        return "\n".join(output)
-    except Exception as e:
-        logger.exception("Error fetching market metrics")
-        return f"Error fetching market metrics: {str(e)}"
+    output = ["Market Metrics:", ""]
+    output.append(tabulate(table_data, headers=headers, tablefmt="plain"))
+    return "\n".join(output)
 
 @mcp.tool()
 async def get_prices(
@@ -1010,49 +887,41 @@ async def get_prices(
         option_type: C for Call, P for Put (for options)
         strike: Option strike price (for options)
     """
-    try:
-        lifespan_ctx: ServerContext = ctx.request_context.lifespan_context
-        if not lifespan_ctx.session:
-            return "Error: Tastytrade session not available. Check server logs."
 
-        expiry_datetime = None
-        if expiration_date:
-            try:
-                expiry_datetime = datetime.strptime(expiration_date, "%Y-%m-%d")
-            except ValueError:
-                return "Invalid expiration date format. Please use YYYY-MM-DD format"
+    expiry_datetime = None
+    if expiration_date:
+        try:
+            expiry_datetime = datetime.strptime(expiration_date, "%Y-%m-%d")
+        except ValueError:
+            return "Invalid expiration date format. Please use YYYY-MM-DD format"
 
-        # Use helper to get instrument
-        instrument = await _create_instrument(
-            session=lifespan_ctx.session,
-            underlying_symbol=underlying_symbol,
-            expiration_date=expiry_datetime,
-            option_type=option_type,
-            strike=strike
+    session = ctx.request_context.lifespan_context.session
+    instrument = await _create_instrument(
+        session=session,
+        underlying_symbol=underlying_symbol,
+        expiration_date=expiry_datetime,
+        option_type=option_type,
+        strike=strike
+    )
+
+    if instrument is None:
+        error_msg = f"Could not find instrument for: {underlying_symbol}"
+        if expiry_datetime:
+            error_msg += f" {expiry_datetime.strftime('%Y-%m-%d')} {option_type} {strike}"
+        return error_msg
+
+    streamer_symbol = instrument.streamer_symbol
+    if not streamer_symbol:
+        return f"Could not get streamer symbol for {instrument.symbol}"
+
+    quote_result = await _get_quote(session, streamer_symbol)
+
+    if isinstance(quote_result, tuple):
+        bid, ask = quote_result
+        return (
+            f"Current prices for {instrument.symbol}:\n"
+            f"Bid: ${bid:.2f}\n"
+            f"Ask: ${ask:.2f}"
         )
-
-        if instrument is None:
-            error_msg = f"Could not find instrument for: {underlying_symbol}"
-            if expiry_datetime:
-                 error_msg += f" {expiry_datetime.strftime('%Y-%m-%d')} {option_type} {strike}"
-            return error_msg
-
-        streamer_symbol = instrument.streamer_symbol
-        if not streamer_symbol:
-            return f"Could not get streamer symbol for {instrument.symbol}"
-
-        quote_result = await _get_quote(lifespan_ctx.session, streamer_symbol)
-
-        if isinstance(quote_result, tuple):
-            bid, ask = quote_result
-            return (
-                f"Current prices for {instrument.symbol}:\n"
-                f"Bid: ${bid:.2f}\n"
-                f"Ask: ${ask:.2f}"
-            )
-        else:
-            return quote_result
-
-    except Exception as e:
-        logger.exception(f"Error getting prices for {underlying_symbol}")
-        return f"Error getting prices: {str(e)}"
+    else:
+        return quote_result

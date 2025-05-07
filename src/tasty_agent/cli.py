@@ -69,16 +69,16 @@ def main():
     """Main entry point for the tasty-agent CLI."""
     if len(sys.argv) > 1 and sys.argv[1] == "setup":
         if auth():
-            print("Setup successful.")
+            print("Authentication successful.", file=sys.stdout)
         else:
-            print("Setup failed.")
-        sys.exit(0) # Exit after setup
+            print("Authentication failed.", file=sys.stderr)
+        sys.exit(0) # Exit
     else:
         # Run the MCP server
         try:
             from .server import mcp
         except ImportError:
-            print("Error: Could not import server module.")
+            print("Error: Could not import server module.", file=sys.stderr)
             sys.exit(1)
 
         mcp.run()
