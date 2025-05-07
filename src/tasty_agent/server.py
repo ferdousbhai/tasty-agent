@@ -9,7 +9,7 @@ import logging
 from zoneinfo import ZoneInfo
 import keyring
 import os
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 
 from mcp.server.fastmcp import FastMCP, Context
 from tastytrade import Session, Account
@@ -101,48 +101,43 @@ async def _create_instrument(
     underlying_symbol: str,
     expiration_date: datetime | None = None,
     option_type: Literal["C", "P"] | None = None,
-    strike: float | None = None,
+    strike_price: float | None = None,
 ) -> Option | Equity | None:
     """(Helper) Create an instrument object for a given symbol."""
-    # If no option parameters, treat as equity
-    if not any([expiration_date, option_type, strike]):
+
+    if not expiration_date or not option_type or not strike_price:
         return await Equity.a_get(session, underlying_symbol)
 
-    # Validate all option parameters are present
-    if not all([expiration_date, option_type, strike]):
-
-        logger.error("Must provide all option parameters (expiration_date, option_type, strike) or none")
+    if not expiration_date is not None and option_type is not None and strike_price is not None:
+        logger.error(
+            "If any option parameter (expiration_date, option_type, strike_price) is provided, "
+            "all must be provided. To fetch an equity, omit all option parameters."
+        )
         return None
 
     # Get option chain
-    chain: list[NestedOptionChain] = await NestedOptionChain.a_get(session, underlying_symbol)
-    if not chain:
+    if not (chains := await NestedOptionChain.a_get(session, underlying_symbol)):
         logger.error(f"No option chain found for {underlying_symbol}")
         return None
-    option_chain = chain[0]
+    option_chain = chains[0]
 
     # Find matching expiration
     exp_date = expiration_date.date()
-    expiration = next(
-        (exp for exp in option_chain.expirations
-        if exp.expiration_date == exp_date),
-        None
-    )
-    if not expiration:
+    if not (expiration := next(
+        (exp for exp in option_chain.expirations if exp.expiration_date == exp_date), None
+    )):
         logger.error(f"No expiration found for date {exp_date} in chain for {underlying_symbol}")
         return None
 
     # Find matching strike
-    strike_obj = next(
-        (s for s in expiration.strikes
-        if float(s.strike_price) == strike),
-        None
-    )
-    if not strike_obj:
-        logger.error(f"No strike found for {strike} on {exp_date} in chain for {underlying_symbol}")
+    if not (strike_obj := next(
+        (s for s in expiration.strikes if float(s.strike_price) == strike_price), None
+    )):
+        logger.error(f"No strike found for {strike_price} on {exp_date} in chain for {underlying_symbol}")
         return None
 
     # Get option symbol based on type
+    # option_type is guaranteed non-None here
     option_symbol = strike_obj.call if option_type == "C" else strike_obj.put
     return await Option.a_get(session, option_symbol)
 
@@ -161,6 +156,34 @@ async def _get_quote(session: Session, streamer_symbol: str) -> tuple[Decimal, D
         logger.warning(f"WebSocket connection interrupted for {streamer_symbol}")
         return f"WebSocket connection interrupted for {streamer_symbol}"
 
+def _get_instrument_tick_size(current_price: Decimal, instrument: Equity | Option) -> Decimal:
+    """Determines the correct tick size for an instrument at a given price."""
+    determined_tick = Decimal('0.01') # Default tick size
+
+    rules_to_check = []
+    if isinstance(instrument, Equity):
+        rules_to_check = getattr(instrument, 'tick_sizes', None) or []
+    elif isinstance(instrument, Option):
+        rules_to_check = getattr(instrument, 'option_tick_sizes', None) or []
+
+    if not rules_to_check:
+        if isinstance(instrument, (Equity, Option)):
+            logger.warning(f"No tick size rules found for {instrument.symbol}, using default {determined_tick}")
+        return determined_tick
+
+    applicable_rule_value = None
+    fallback_rule_value = None # Value from a rule with no threshold
+
+    for rule in rules_to_check: # rule is a TickSize(value: Decimal, threshold: Decimal | None)
+        if rule.threshold is not None:
+            if current_price < rule.threshold:
+                applicable_rule_value = rule.value
+                break # First threshold rule that matches is the one
+        else:
+            fallback_rule_value = rule.value # This is a rule without a threshold
+
+    return applicable_rule_value or fallback_rule_value or determined_tick
+
 async def _execute_trade_with_monitoring(
     session: Session,
     account: Account,
@@ -169,7 +192,7 @@ async def _execute_trade_with_monitoring(
     action: Literal["Buy to Open", "Sell to Close"],
     expiration_date: str | None = None,
     option_type: Literal["C", "P"] | None = None,
-    strike: float | None = None,
+    strike_price: float | None = None,
     dry_run: bool = False,
     job_id: str | None = None, # For logging
 ) -> tuple[bool, str]:
@@ -190,23 +213,26 @@ async def _execute_trade_with_monitoring(
             underlying_symbol=underlying_symbol,
             expiration_date=expiry_datetime,
             option_type=option_type,
-            strike=strike
+            strike_price=strike_price
         )
         if instrument is None:
             error_msg = f"Could not create instrument for symbol: {underlying_symbol}"
             if expiry_datetime:
-                error_msg += f" with expiration {expiration_date}, type {option_type}, strike {strike}"
+                error_msg += f" with expiration {expiration_date}, type {option_type}, strike price {strike_price}"
             raise ValueError(error_msg)
 
-        # --- Price Fetching ---
         quote_result = await _get_quote(session, instrument.streamer_symbol)
         if not isinstance(quote_result, tuple):
             raise ValueError(f"Failed to get price for {instrument.symbol}: {quote_result}")
         bid, ask = quote_result
-        price_decimal = ask if action == "Buy to Open" else bid
-        price_float = float(price_decimal)
+        price_decimal = (ask + bid) / Decimal('2.0')
 
-        # --- Pre-Trade Checks --- (Adapted from place_trade)
+        # Determine Tick Size and Round Price
+        initial_tick_size = _get_instrument_tick_size(price_decimal, instrument)
+        if initial_tick_size > Decimal('0'): # Ensure tick size is positive
+            price_decimal = (price_decimal / initial_tick_size).quantize(Decimal('1'), rounding=ROUND_HALF_UP) * initial_tick_size
+
+        # --- Pre-Trade Checks ---
         try:
             if action == "Buy to Open":
                 multiplier = instrument.multiplier if hasattr(instrument, 'multiplier') else 1
@@ -222,7 +248,7 @@ async def _execute_trade_with_monitoring(
                 if order_value > buying_power:
                     adjusted_quantity = int(buying_power / (price_decimal * Decimal(str(multiplier))))
                     if adjusted_quantity <= 0:
-                        raise ValueError(f"Order rejected: Insufficient buying power (${buying_power:,.2f}) for even 1 unit @ ${price_float:.2f} (Value: ${price_decimal * Decimal(str(multiplier)):,.2f})")
+                        raise ValueError(f"Order rejected: Insufficient buying power (${buying_power:,.2f}) for even 1 unit @ ${price_decimal:.2f} (Value: ${price_decimal * Decimal(str(multiplier)):,.2f})")
                     logger.warning(
                         f"{log_prefix}Reduced order quantity from {original_requested_quantity} to {adjusted_quantity} "
                         f"due to buying power limit (${buying_power:,.2f} < ${order_value:,.2f})"
@@ -296,7 +322,7 @@ async def _execute_trade_with_monitoring(
 
         logger.info(
             f"{log_prefix}Attempting order placement (Attempt {attempt+1}/{max_placement_retries+1}): "
-            f"{action} {current_attempt_quantity} {instrument.symbol} @ ${price_float:.2f}"
+            f"{action} {current_attempt_quantity} {instrument.symbol} @ ${price_decimal:.2f}"
         )
 
         current_order_details = NewOrder(
@@ -347,7 +373,7 @@ async def _execute_trade_with_monitoring(
 
     # Handle Dry Run Success
     if dry_run:
-        msg = f"Dry run successful (Simulated: {action} {final_quantity} {instrument.symbol} @ ${price_float:.2f})"
+        msg = f"Dry run successful (Simulated: {action} {final_quantity} {instrument.symbol} @ ${price_decimal:.2f})"
         if placed_order_response.warnings:
             msg += "\nWarnings:\n" + "\n".join(str(w) for w in placed_order_response.warnings)
         logger.info(f"{log_prefix}{msg}")
@@ -401,7 +427,7 @@ async def _execute_trade_with_monitoring(
              logger.warning(f"{log_prefix}Cannot adjust order {order.id}, failed to build final leg earlier.")
              continue # Skip adjustment for this attempt
 
-        price_delta = Decimal("0.01") if action == "Buy to Open" else Decimal("-0.01")
+        current_price_decimal = Decimal('0')
         try:
              current_price_decimal = Decimal(str(order.price))
         except Exception:
@@ -409,10 +435,21 @@ async def _execute_trade_with_monitoring(
              logger.error(f"{log_prefix}{error_msg}")
              continue # Skip adjustment
 
+        # Determine correct tick size for adjustment based on current order price
+        adjustment_tick_size = _get_instrument_tick_size(current_price_decimal, instrument)
+        if adjustment_tick_size <= Decimal('0'): # Safety check
+            logger.error(f"{log_prefix}Invalid adjustment tick size {adjustment_tick_size} for order {order.id}. Skipping adjustment.")
+            continue
+            
+        price_delta = adjustment_tick_size if action == "Buy to Open" else -adjustment_tick_size
         new_price_decimal = current_price_decimal + price_delta
+        
+        # The new_price_decimal should inherently be on a valid tick boundary 
+        # if current_price_decimal was on one and price_delta is a valid tick.
+
         logger.info(
             f"{log_prefix}Adjusting order price from ${current_price_decimal:.2f} to ${new_price_decimal:.2f} "
-            f"(Fill Attempt {fill_attempt + 1}/20)"
+            f"(using tick ${adjustment_tick_size:.4f}) (Fill Attempt {fill_attempt + 1}/20)"
         )
 
         replacement_order_details = NewOrder(
@@ -448,7 +485,7 @@ async def schedule_trade(
     action: Literal["Buy to Open", "Sell to Close"],
     quantity: int,
     underlying_symbol: str,
-    strike: float | None = None,
+    strike_price: float | None = None,
     option_type: Literal["C", "P"] | None = None,
     expiration_date: str | None = None,
     dry_run: bool = False,
@@ -461,7 +498,7 @@ async def schedule_trade(
         action: Buy to Open or Sell to Close
         quantity: Number of shares/contracts
         underlying_symbol: Stock ticker symbol
-        strike: Option strike price (if option)
+        strike_price: Option strike price (if option)
         option_type: C for Call, P for Put (if option)
         expiration_date: Option expiry in YYYY-MM-DD format (if option)
         dry_run: Test without executing if True
@@ -479,21 +516,20 @@ async def schedule_trade(
     job_id = str(uuid4())
     desc_parts = [action, str(quantity), underlying_symbol]
     if option_type:
-        desc_parts.extend([f"{option_type}{strike}", f"exp {expiration_date}"])
+        desc_parts.extend([f"{option_type}{strike_price}", f"exp {expiration_date}"])
     description = " ".join(desc_parts)
 
     trade_params = {
         "underlying_symbol": underlying_symbol, "quantity": quantity, "action": action,
-        "expiration_date": expiration_date, "option_type": option_type, "strike": strike,
+        "expiration_date": expiration_date, "option_type": option_type, "strike_price": strike_price,
         "dry_run": dry_run,
     }
 
-    # --- Inner Execution Function (Handles Lock and Calls Helper) ---
+    # --- Inner Execution Function (Called by scheduled tasks to execute trades) ---
     async def execute_trade_locked(exec_job_id: str, exec_params: dict) -> tuple[bool, str]:
         """Acquires lock, calls the main execution helper, releases lock."""
         async with trade_execution_lock: # Ensure sequential execution
             try:
-                # Call the refactored trade execution logic
                 success, message = await _execute_trade_with_monitoring(
                     session=lifespan_ctx.session,
                     account=lifespan_ctx.account,
@@ -506,20 +542,25 @@ async def schedule_trade(
                 return False, f"Trade execution failed unexpectedly: {str(e)}"
 
     try:
-        if is_market_open():
-            # Market is open, execute immediately after acquiring lock
-            job = ScheduledTradeJob(
-                 job_id=job_id, description=description, status="processing",
-                 trade_params=trade_params, execution_task=None
-            )
-            pending_trades[job_id] = job
-            success, message = await execute_trade_locked(job_id, trade_params)
-            # Remove from pending list regardless of outcome for immediate execution
-            if job_id in pending_trades:
-                del pending_trades[job_id]
-            return message # Return the result message from execution
+        if dry_run or is_market_open():
+            # --- Dry Run or Market Open (Non-Dry Run): Execute immediately and directly ---
+            log_context = "Dry run" if dry_run else "Market-open"
+            async with trade_execution_lock:
+                try:
+                    # trade_params correctly reflects the dry_run status from initial arguments.
+                    _, message = await _execute_trade_with_monitoring(
+                        session=lifespan_ctx.session,
+                        account=lifespan_ctx.account,
+                        job_id=job_id, # For logging
+                        **trade_params
+                    )
+                    return message
+                except Exception as e:
+                    logger.exception(f"[Job: {job_id}] Unexpected error during direct {log_context.lower()} execution")
+                    return f"{log_context} execution failed unexpectedly: {str(e)}"
         else:
-            # Market is closed, schedule delayed execution
+            # --- Market Closed (Non-Dry Run): Schedule for later ---
+            # This block is now implicitly: not dry_run and not is_market_open()
             next_market_open = get_next_market_open()
             time_until = format_time_until(next_market_open)
             # Ensure consistent timezone for comparison
@@ -544,8 +585,9 @@ async def schedule_trade(
 
                     # Attempt execution via locked helper
                     job.status = "processing"
-                    success, message = await execute_trade_locked(run_job_id, run_params)
-                    logger.info(f"[Job: {run_job_id}] Scheduled execution result: {success} - {message}")
+                    # run_params here will have dry_run=False because this path is only taken if dry_run was initially False.
+                    success, message_inner = await execute_trade_locked(run_job_id, run_params)
+                    logger.info(f"[Job: {run_job_id}] Scheduled execution result: {success} - {message_inner}")
 
                     # Update final status based on execution result
                     job.status = "completed" if success else "failed"
@@ -577,7 +619,7 @@ async def schedule_trade(
             # Create the job entry first
             job = ScheduledTradeJob(
                 job_id=job_id, description=description, status="scheduled",
-                trade_params=trade_params, scheduled_execution_time=next_market_open,
+                trade_params=trade_params, scheduled_execution_time=next_market_open, # trade_params has dry_run=False here
                 execution_task=None # Will be set below
             )
             pending_trades[job_id] = job
@@ -590,7 +632,6 @@ async def schedule_trade(
 
     except Exception as e:
         # General error during scheduling phase
-        # Clean up if job was partially added
         if job_id in pending_trades and pending_trades[job_id].status in ["scheduled", "processing"]:
             if pending_trades[job_id].execution_task:
                 pending_trades[job_id].execution_task.cancel()
@@ -675,8 +716,6 @@ async def list_scheduled_trades(ctx: Context) -> str:
 
     return "\n\n".join(output_sections)
 
-
-# --- Tools (Data Retrieval - Reverted due to ctx injection bug) ---
 
 @mcp.tool()
 async def get_nlv_history(
@@ -875,7 +914,7 @@ async def get_prices(
     underlying_symbol: str,
     expiration_date: str | None = None,
     option_type: Literal["C", "P"] | None = None,
-    strike: float | None = None,
+    strike_price: float | None = None,
 ) -> str:
     """Get current bid/ask prices for stock or option.
 
@@ -885,7 +924,7 @@ async def get_prices(
         underlying_symbol: Stock ticker symbol
         expiration_date: Option expiry in YYYY-MM-DD format (for options)
         option_type: C for Call, P for Put (for options)
-        strike: Option strike price (for options)
+        strike_price: Option strike price (for options)
     """
 
     expiry_datetime = None
@@ -901,13 +940,13 @@ async def get_prices(
         underlying_symbol=underlying_symbol,
         expiration_date=expiry_datetime,
         option_type=option_type,
-        strike=strike
+        strike_price=strike_price
     )
 
     if instrument is None:
         error_msg = f"Could not find instrument for: {underlying_symbol}"
         if expiry_datetime:
-            error_msg += f" {expiry_datetime.strftime('%Y-%m-%d')} {option_type} {strike}"
+            error_msg += f" {expiry_datetime.strftime('%Y-%m-%d')} {option_type} {strike_price}"
         return error_msg
 
     streamer_symbol = instrument.streamer_symbol
