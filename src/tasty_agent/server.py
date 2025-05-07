@@ -225,19 +225,19 @@ async def _execute_trade_with_monitoring(
         if not isinstance(quote_result, tuple):
             raise ValueError(f"Failed to get price for {instrument.symbol}: {quote_result}")
         bid, ask = quote_result
-        price_decimal = (ask + bid) / Decimal('2.0')
+        price = (ask + bid) / Decimal('2.0') # Midpoint of bid and ask, used for tick size determination
 
-        # Determine Tick Size and Round Price
-        initial_tick_size = _get_instrument_tick_size(price_decimal, instrument)
+        # Determine Tick Size and Round Price, ensure price is on a valid tick boundary
+        initial_tick_size = _get_instrument_tick_size(price, instrument)
         if initial_tick_size > Decimal('0'): # Ensure tick size is positive
-            price_decimal = (price_decimal / initial_tick_size).quantize(Decimal('1'), rounding=ROUND_HALF_UP) * initial_tick_size
+            price = (price / initial_tick_size).quantize(Decimal('1'), rounding=ROUND_HALF_UP) * initial_tick_size
 
         # --- Pre-Trade Checks ---
         try:
             if action == "Buy to Open":
                 multiplier = instrument.multiplier if hasattr(instrument, 'multiplier') else 1
                 balances = await account.a_get_balances(session)
-                order_value = price_decimal * Decimal(str(quantity)) * Decimal(str(multiplier))
+                order_value = price * Decimal(str(quantity)) * Decimal(str(multiplier))
 
                 buying_power = (
                     balances.derivative_buying_power
@@ -246,9 +246,9 @@ async def _execute_trade_with_monitoring(
                 )
 
                 if order_value > buying_power:
-                    adjusted_quantity = int(buying_power / (price_decimal * Decimal(str(multiplier))))
+                    adjusted_quantity = int(buying_power / (price * Decimal(str(multiplier))))
                     if adjusted_quantity <= 0:
-                        raise ValueError(f"Order rejected: Insufficient buying power (${buying_power:,.2f}) for even 1 unit @ ${price_decimal:.2f} (Value: ${price_decimal * Decimal(str(multiplier)):,.2f})")
+                        raise ValueError(f"Order rejected: Insufficient buying power (${buying_power:,.2f}) for even 1 unit @ ${price:.2f} (Value: ${price * Decimal(str(multiplier)):,.2f})")
                     logger.warning(
                         f"{log_prefix}Reduced order quantity from {original_requested_quantity} to {adjusted_quantity} "
                         f"due to buying power limit (${buying_power:,.2f} < ${order_value:,.2f})"
@@ -266,8 +266,8 @@ async def _execute_trade_with_monitoring(
                     sum(leg.quantity for leg in order.legs if leg.symbol == instrument.symbol)
                     for order in live_orders
                     if order.status in (OrderStatus.LIVE, OrderStatus.RECEIVED) and
-                       order.legs and
-                       order.legs[0].action == OrderAction.SELL_TO_CLOSE
+                        order.legs and
+                        order.legs[0].action == OrderAction.SELL_TO_CLOSE
                 )
 
                 available_quantity = position.quantity - pending_sell_quantity
@@ -288,13 +288,12 @@ async def _execute_trade_with_monitoring(
                     quantity = available_quantity
 
                 if quantity <= 0:
-                     raise ValueError(f"Calculated available quantity ({available_quantity}) is zero or less.")
+                    raise ValueError(f"Calculated available quantity ({available_quantity}) is zero or less.")
 
         except ValueError as pre_trade_error:
-             raise pre_trade_error # Re-raise to be caught by the outer handler
+            raise pre_trade_error # Re-raise to be caught by the outer handler
 
     except ValueError as setup_or_check_error:
-        # Catch errors from instrument creation, pricing, or pre-trade checks
         logger.error(f"{log_prefix}{str(setup_or_check_error)}")
         return False, f"Trade setup/check error: {str(setup_or_check_error)}"
 
@@ -322,14 +321,14 @@ async def _execute_trade_with_monitoring(
 
         logger.info(
             f"{log_prefix}Attempting order placement (Attempt {attempt+1}/{max_placement_retries+1}): "
-            f"{action} {current_attempt_quantity} {instrument.symbol} @ ${price_decimal:.2f}"
+            f"{action} {current_attempt_quantity} {instrument.symbol} @ ${price:.2f}"
         )
 
         current_order_details = NewOrder(
             time_in_force=OrderTimeInForce.DAY,
             order_type=OrderType.LIMIT,
             legs=[leg],
-            price=price_decimal * (-1 if action == "Buy to Open" else 1)
+            price=price * (-1 if action == "Buy to Open" else 1)
         )
 
         # Attempt to Place Order
@@ -373,7 +372,7 @@ async def _execute_trade_with_monitoring(
 
     # Handle Dry Run Success
     if dry_run:
-        msg = f"Dry run successful (Simulated: {action} {final_quantity} {instrument.symbol} @ ${price_decimal:.2f})"
+        msg = f"Dry run successful (Simulated: {action} {final_quantity} {instrument.symbol} @ ${price:.2f})"
         if placed_order_response.warnings:
             msg += "\nWarnings:\n" + "\n".join(str(w) for w in placed_order_response.warnings)
         logger.info(f"{log_prefix}{msg}")
