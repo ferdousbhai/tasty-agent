@@ -55,7 +55,7 @@ def auth() -> bool:
 
     except Exception as e:
         console.print(f"\n[bold red]Error setting up credentials:[/bold red] {str(e)}")
-        # Clean up on failure
+        # Clean up
         for key in ["username", "password", "account_id"]:
             try:
                 keyring.delete_password("tastytrade", key)
