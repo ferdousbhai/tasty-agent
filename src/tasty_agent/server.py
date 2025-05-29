@@ -8,73 +8,221 @@ import logging
 import os
 from tabulate import tabulate
 from typing import Literal, AsyncIterator
-from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 from mcp.server.fastmcp import FastMCP, Context
+from exchange_calendars import get_calendar
 from tastytrade import Session, Account, metrics
 from tastytrade.dxfeed import Quote
 from tastytrade.instruments import Option, Equity, NestedOptionChain
 from tastytrade.order import NewOrder, OrderStatus, OrderAction, OrderTimeInForce, OrderType, Leg, PriceEffect
 from tastytrade.streamer import DXLinkStreamer
 
-from ..utils import is_market_open, format_time_until, get_next_market_open
-
 logger = logging.getLogger(__name__)
 
 
 @dataclass
 class ServerContext:
-    trade_execution_lock: asyncio.Lock
     session: Session | None
     account: Account | None
+    # Cached account data that will be exposed as MCP resources
+    account_balances: dict | None = None
+    current_positions: list | None = None
+    live_orders: list | None = None
+    last_update: datetime | None = None
 
-@asynccontextmanager
-async def lifespan(server: FastMCP) -> AsyncIterator[ServerContext]:
-    """Manages the trade state, lock, and Tastytrade session lifecycle."""
-    context = None # Initialize context to None for broader scope in finally
+async def _update_account_data(context: ServerContext):
+    """Update cached account data."""
+    if not context.session or not context.account:
+        return
+
     try:
-        username = keyring.get_password("tastytrade", "username") or os.getenv("TASTYTRADE_USERNAME")
-        password = keyring.get_password("tastytrade", "password") or os.getenv("TASTYTRADE_PASSWORD")
-        account_id = keyring.get_password("tastytrade", "account_id") or os.getenv("TASTYTRADE_ACCOUNT_ID")
+        # Get all account data concurrently
+        balances_task = context.account.a_get_balances(context.session)
+        positions_task = context.account.a_get_positions(context.session, include_marks=True)
+        live_orders_task = context.account.a_get_live_orders(context.session)
 
-        if not username or not password:
-            raise ValueError(
-                "Missing Tastytrade credentials. Please run 'tasty-agent setup' or set "
-                "TASTYTRADE_USERNAME and TASTYTRADE_PASSWORD environment variables."
-            )
-
-        session = Session(username, password)
-        accounts = Account.get(session)
-
-        if account_id:
-            account = next((acc for acc in accounts if acc.account_number == account_id), None)
-            if not account:
-                raise ValueError(f"Specified Tastytrade account ID '{account_id}' not found.")
-        else:
-            account = accounts[0]
-            if len(accounts) > 1:
-                logger.warning(f"No TASTYTRADE_ACCOUNT_ID specified. Multiple accounts found. Using first found account: {account.account_number}")
-            else:
-                logger.info(f"Using Tastytrade account: {account.account_number}")
-
-        context = ServerContext(
-            trade_execution_lock=asyncio.Lock(),
-            session=session,
-            account=account,
+        balances, positions, live_orders = await asyncio.gather(
+            balances_task, positions_task, live_orders_task
         )
 
-        yield context
+        # Update context
+        context.account_balances = {
+            "cash_balance": float(balances.cash_balance),
+            "equity_buying_power": float(balances.equity_buying_power),
+            "derivative_buying_power": float(balances.derivative_buying_power),
+            "net_liquidating_value": float(balances.net_liquidating_value),
+            "maintenance_excess": float(balances.maintenance_excess)
+        }
 
-    finally:
-        logger.info("Cleaning up lifespan resources...")
-        if context:
-            pass # No specific cleanup needed for ServerContext as simplified
+        context.current_positions = [
+            {
+                "symbol": pos.symbol,
+                "instrument_type": pos.instrument_type,
+                "quantity": float(pos.quantity),
+                "mark_price": float(pos.mark_price) if pos.mark_price else None,
+                "multiplier": pos.multiplier,
+                "value": float(pos.mark_price * pos.quantity * pos.multiplier) if pos.mark_price else None
+            }
+            for pos in positions
+        ]
 
+        context.live_orders = [
+            {
+                "id": order.id,
+                "symbol": order.legs[0].symbol if order.legs else None,
+                "action": order.legs[0].action.value if order.legs and hasattr(order.legs[0].action, 'value') else str(order.legs[0].action) if order.legs else None,
+                "quantity": float(order.legs[0].quantity) if order.legs else None,
+                "price": float(order.price) if order.price else None,
+                "order_type": order.order_type.value if hasattr(order.order_type, 'value') else str(order.order_type),
+                "status": order.status.value if hasattr(order.status, 'value') else str(order.status)
+            }
+            for order in live_orders
+        ]
+
+        context.last_update = datetime.now()
+        logger.info("Updated account data cache")
+
+    except Exception as e:
+        logger.error(f"Failed to update account data: {e}")
+
+@asynccontextmanager
+async def lifespan(_server: FastMCP) -> AsyncIterator[ServerContext]:
+    """Manages the trade state, lock, and Tastytrade session lifecycle."""
+    # Get credentials from keyring or environment
+    username = keyring.get_password("tastytrade", "username") or os.getenv("TASTYTRADE_USERNAME")
+    password = keyring.get_password("tastytrade", "password") or os.getenv("TASTYTRADE_PASSWORD")
+    account_id = keyring.get_password("tastytrade", "account_id") or os.getenv("TASTYTRADE_ACCOUNT_ID")
+
+    if not username or not password:
+        raise ValueError(
+            "Missing Tastytrade credentials. Please run 'tasty-agent setup' or set "
+            "TASTYTRADE_USERNAME and TASTYTRADE_PASSWORD environment variables."
+        )
+
+    # Create session and get accounts
+    session = Session(username, password)
+    accounts = Account.get(session)
+
+    # Select account
+    if account_id:
+        account = next((acc for acc in accounts if acc.account_number == account_id), None)
+        if not account:
+            raise ValueError(f"Specified Tastytrade account ID '{account_id}' not found.")
+    else:
+        account = accounts[0]
+        if len(accounts) > 1:
+            logger.warning(f"Multiple accounts found. Using first account: {account.account_number}")
+        else:
+            logger.info(f"Using Tastytrade account: {account.account_number}")
+
+    # Create and yield context
+    context = ServerContext(
+        session=session,
+        account=account,
+    )
+
+    # Initial data load
+    await _update_account_data(context)
+
+    yield context
 
 mcp = FastMCP("TastyTrade", lifespan=lifespan)
 
+# Add MCP resources
+@mcp.resource("account://balances")
+async def get_account_balances_resource(ctx: Context) -> str:
+    """Current account cash balance, buying power, and net liquidating value."""
+    context: ServerContext = ctx.request_context.lifespan_context
+
+    # Update data if stale (older than 30 seconds)
+    if not context.last_update or (datetime.now() - context.last_update).seconds > 30:
+        await _update_account_data(context)
+
+    if not context.account_balances:
+        return "Account balances unavailable"
+
+    balances = context.account_balances
+    return (
+        f"Account Balances:\n"
+        f"Cash Balance: ${balances['cash_balance']:,.2f}\n"
+        f"Equity Buying Power: ${balances['equity_buying_power']:,.2f}\n"
+        f"Derivative Buying Power: ${balances['derivative_buying_power']:,.2f}\n"
+        f"Net Liquidating Value: ${balances['net_liquidating_value']:,.2f}\n"
+        f"Maintenance Excess: ${balances['maintenance_excess']:,.2f}"
+    )
+
+@mcp.resource("account://positions")
+async def get_current_positions_resource(ctx: Context) -> str:
+    """All currently open stock and option positions with current values."""
+    context: ServerContext = ctx.request_context.lifespan_context
+
+    # Update data if stale
+    if not context.last_update or (datetime.now() - context.last_update).seconds > 30:
+        await _update_account_data(context)
+
+    if not context.current_positions:
+        return "No open positions found."
+
+    headers = ["Symbol", "Type", "Quantity", "Mark Price", "Value"]
+    table_data = []
+
+    for pos in context.current_positions:
+        table_data.append([
+            pos["symbol"],
+            pos["instrument_type"],
+            pos["quantity"],
+            f"${pos['mark_price']:,.2f}" if pos["mark_price"] else "N/A",
+            f"${pos['value']:,.2f}" if pos["value"] else "N/A"
+        ])
+
+    output = ["Current Positions:", ""]
+    output.append(tabulate(table_data, headers=headers, tablefmt="plain"))
+    return "\n".join(output)
+
+@mcp.resource("account://live-orders")
+async def get_live_orders_resource(ctx: Context) -> str:
+    """All currently live (open) orders for the account."""
+    context: ServerContext = ctx.request_context.lifespan_context
+
+    # Update data if stale
+    if not context.last_update or (datetime.now() - context.last_update).seconds > 30:
+        await _update_account_data(context)
+
+    if not context.live_orders:
+        return "No live orders found."
+
+    headers = ["ID", "Symbol", "Action", "Quantity", "Type", "Price", "Status"]
+    table_data = []
+
+    for order in context.live_orders:
+        table_data.append([
+            order["id"] or "N/A",
+            order["symbol"] or "N/A",
+            order["action"] or "N/A",
+            order["quantity"] or "N/A",
+            order["order_type"],
+            f"${order['price']:.2f}" if order["price"] else "N/A",
+            order["status"]
+        ])
+
+    output = ["Live Orders:", ""]
+    output.append(tabulate(table_data, headers=headers, tablefmt="plain"))
+    return "\n".join(output)
 
 # --- Helper Functions ---
+def _get_market_status() -> tuple[bool, datetime | None]:
+    """Get market status and next open time if market is closed."""
+    nyse = get_calendar('XNYS')  # NYSE calendar
+    current_time = datetime.now(ZoneInfo('America/New_York'))
+    is_open = nyse.is_open_on_minute(current_time)
+
+    if is_open:
+        return True, None
+
+    next_open = nyse.next_open(current_time)
+    return False, next_open
+
 async def _create_instrument(
     session: Session,
     underlying_symbol: str,
@@ -87,14 +235,6 @@ async def _create_instrument(
     if not expiration_date or not option_type or not strike_price:
         return await Equity.a_get(session, underlying_symbol)
 
-    if not expiration_date is not None and option_type is not None and strike_price is not None:
-        logger.error(
-            "If any option parameter (expiration_date, option_type, strike_price) is provided, "
-            "all must be provided. To fetch an equity, omit all option parameters."
-        )
-        return None
-
-    # Get option chain
     if not (chains := await NestedOptionChain.a_get(session, underlying_symbol)):
         logger.error(f"No option chain found for {underlying_symbol}")
         return None
@@ -115,12 +255,10 @@ async def _create_instrument(
         logger.error(f"No strike found for {strike_price} on {exp_date} in chain for {underlying_symbol}")
         return None
 
-    # Get option symbol based on type
-    # option_type is guaranteed non-None here
     option_symbol = strike_obj.call if option_type == "C" else strike_obj.put
     return await Option.a_get(session, option_symbol)
 
-async def _get_quote(session: Session, streamer_symbol: str) -> tuple[Decimal, Decimal] | str:
+async def _get_quote(session: Session, streamer_symbol: str) -> tuple[Decimal, Decimal]:
     """(Helper) Get current quote for a symbol via DXLinkStreamer."""
     try:
         async with DXLinkStreamer(session) as streamer:
@@ -128,12 +266,85 @@ async def _get_quote(session: Session, streamer_symbol: str) -> tuple[Decimal, D
             quote = await asyncio.wait_for(streamer.get_event(Quote), timeout=10.0)
             return Decimal(str(quote.bid_price)), Decimal(str(quote.ask_price))
     except asyncio.TimeoutError:
-        logger.warning(f"Timed out waiting for quote data for {streamer_symbol}")
-        return f"Timed out waiting for quote data for {streamer_symbol}"
+        raise ValueError(f"Timed out waiting for quote data for {streamer_symbol}")
     except asyncio.CancelledError:
-        # Handle WebSocket cancellation explicitly
-        logger.warning(f"WebSocket connection interrupted for {streamer_symbol}")
-        return f"WebSocket connection interrupted for {streamer_symbol}"
+        raise ValueError(f"WebSocket connection interrupted for {streamer_symbol}")
+
+async def _determine_limit_price(
+    session: Session,
+    instrument: Option | Equity,
+    action: str,
+    user_price: Decimal | None
+) -> Decimal:
+    """Determine the limit price for an order, adjusting user price if necessary."""
+    bid_price, ask_price = await _get_quote(session, instrument.streamer_symbol)
+
+    if user_price is not None:
+        # Adjust user price to be within bid-ask range if necessary
+        if bid_price > Decimal(0) and ask_price > Decimal(0):
+            if user_price < bid_price:
+                logger.warning(f"Adjusted order price from ${user_price:.2f} to ${bid_price:.2f} (bid price)")
+                return bid_price
+            elif user_price > ask_price:
+                logger.warning(f"Adjusted order price from ${user_price:.2f} to ${ask_price:.2f} (ask price)")
+                return ask_price
+        logger.info(f"Using user-provided order price: ${user_price:.2f}")
+        return user_price
+
+    # Calculate mid-price when no user price provided
+    if bid_price > Decimal(0) and ask_price > Decimal(0) and ask_price >= bid_price:
+        mid_price = ((bid_price + ask_price) / 2).quantize(Decimal('0.01'))
+        logger.info(f"Using mid-price: ${mid_price:.2f}")
+        return mid_price
+
+    # Fallback to bid/ask based on action
+    fallback_price = ask_price if action == "Buy to Open" else bid_price
+    if fallback_price > Decimal(0):
+        logger.warning(f"Using {'ask' if action == 'Buy to Open' else 'bid'} price: ${fallback_price:.2f}")
+        return fallback_price
+
+    raise ValueError(f"Cannot determine valid order price. Bid: {bid_price}, Ask: {ask_price}")
+
+async def _place_order(
+    account: Account,
+    session: Session,
+    instrument: Option | Equity,
+    action: str,
+    quantity: int,
+    limit_price: Decimal,
+    dry_run: bool,
+    context: ServerContext | None = None
+) -> str:
+    """Place the actual order and return result message."""
+    order_action = OrderAction.BUY_TO_OPEN if action == "Buy to Open" else OrderAction.SELL_TO_CLOSE
+    price_effect = PriceEffect.DEBIT if action == "Buy to Open" else PriceEffect.CREDIT
+
+    order = NewOrder(
+        time_in_force=OrderTimeInForce.DAY,
+        order_type=OrderType.LIMIT,
+        legs=[instrument.build_leg(quantity, order_action)],
+        price=limit_price,
+        price_effect=price_effect
+    )
+
+    logger.info(f"Placing order: {action} {quantity} {instrument.symbol} @ ${limit_price:.2f}")
+    response = await account.a_place_order(session, order, dry_run=dry_run)
+
+    if response.errors:
+        error_msg = "\n".join(str(e) for e in response.errors)
+        return f"Order placement failed:\n{error_msg}"
+
+    # If order was successful and not a dry run, update account data cache
+    if not dry_run and response.order and context:
+        await _update_account_data(context)
+
+    order_id = "N/A - Dry Run" if dry_run else (response.order.id if response.order else "Unknown")
+    success_msg = f"Order placement successful: {action} {quantity} {instrument.symbol} @ ${limit_price:.2f} (ID: {order_id})"
+
+    if response.warnings:
+        success_msg += "\nWarnings:\n" + "\n".join(str(w) for w in response.warnings)
+
+    return success_msg
 
 # --- MCP Server Tools ---
 
@@ -149,16 +360,7 @@ async def place_trade(
     order_price: float | None = None,
     dry_run: bool = False,
 ) -> str:
-    """Attempt to execute a stock/option trade immediately if the market is open or for a dry run.
-    If the market is closed (and not a dry run), the trade is not placed.
-    Uses a lock to ensure sequential execution of trade attempts.
-
-    The order price is the user-specified price, or defaults to the mid-price between bid/ask.
-    The order is placed once. There is no monitoring for fills or price adjustments.
-
-    The specified quantity may be automatically adjusted downwards if it exceeds
-    available buying power (for buy orders) or the number of shares/contracts
-    available to sell (for sell orders).
+    """Execute a stock/option trade.
 
     Args:
         action: Buy to Open or Sell to Close
@@ -167,192 +369,36 @@ async def place_trade(
         strike_price: Option strike price (if option)
         option_type: C for Call, P for Put (if option)
         expiration_date: Option expiry in YYYY-MM-DD format (if option)
-        order_price: Optional. The limit price for the order. If None, mid-price is used.
+        order_price: Optional limit price (defaults to mid-price)
         dry_run: Test without executing if True
     """
-    lifespan_ctx: ServerContext = ctx.request_context.lifespan_context
-    trade_execution_lock = lifespan_ctx.trade_execution_lock
-    session_to_use = lifespan_ctx.session
-    account_to_use = lifespan_ctx.account
+    ctx_data: ServerContext = ctx.request_context.lifespan_context
+    if not ctx_data.session or not ctx_data.account:
+        raise ValueError("Tastytrade session not available. Check server logs.")
 
-    if not session_to_use or not account_to_use:
-        return "Error: Tastytrade session or account not available. Check server logs."
-
-    parsed_expiration_date = None
-    if expiration_date:
-        try:
-            parsed_expiration_date = datetime.strptime(expiration_date, "%Y-%m-%d")
-        except ValueError:
-            return "Invalid expiration date format. Use YYYY-MM-DD."
-
-    trade_id_for_logging = str(uuid4())
-    log_prefix = f"[Trade: {trade_id_for_logging}] "
-
-    # Inner function to encapsulate the core trade logic
-    async def _execute_core_trade(instrument_obj: Equity | Option, user_specified_price: Decimal | None) -> tuple[bool, str]:
-        # Uses variables from the outer scope: action, quantity (as initial_quantity_arg), 
-        # session_to_use, account_to_use, log_prefix, dry_run
-        
-        initial_quantity_arg = quantity
-        final_trade_quantity = initial_quantity_arg
-
-        try:
-            quote_res = await _get_quote(session_to_use, instrument_obj.streamer_symbol)
-            if not isinstance(quote_res, tuple):
-                raise ValueError(f"Failed to get price for {instrument_obj.symbol}: {quote_res}")
-            bid_price, ask_price = quote_res
-
-            limit_price_to_use: Decimal
-            if user_specified_price is not None:
-                limit_price_to_use = user_specified_price
-                logger.info(f"{log_prefix}Using user-provided order price: ${limit_price_to_use:.2f}")
-            else:
-                if bid_price > Decimal(0) and ask_price > Decimal(0) and ask_price >= bid_price:
-                    mid_price = (bid_price + ask_price) / 2
-                    # Basic rounding for now. TODO: Consider instrument tick size for precision.
-                    limit_price_to_use = mid_price.quantize(Decimal('0.01')) 
-                    logger.info(f"{log_prefix}Using mid-price: ${limit_price_to_use:.2f} (Bid: {bid_price:.2f}, Ask: {ask_price:.2f})")
-                else: # Fallback if mid-price cannot be determined
-                    fallback_price = ask_price if action == "Buy to Open" else bid_price
-                    if fallback_price > Decimal(0):
-                        limit_price_to_use = fallback_price
-                        logger.warning(f"{log_prefix}Could not calculate mid-price (Bid: {bid_price}, Ask: {ask_price}). Defaulting to {'ask' if action == 'Buy to Open' else 'bid'} price: ${limit_price_to_use:.2f}")
-                    else:
-                        raise ValueError(f"Cannot determine a valid order price. Bid: {bid_price}, Ask: {ask_price}, Action: {action}.")
-
-            if limit_price_to_use <= Decimal('0'):
-                raise ValueError(f"Calculated or provided order price (${limit_price_to_use:.2f}) is invalid.")
-
-            # Pre-Trade Checks & Quantity Adjustment
-            adjusted_trade_quantity = initial_quantity_arg
-            instr_multiplier = instrument_obj.multiplier if hasattr(instrument_obj, 'multiplier') else 1
-            
-            if action == "Buy to Open":
-                acc_balances = await account_to_use.a_get_balances(session_to_use)
-                current_order_value = limit_price_to_use * Decimal(str(adjusted_trade_quantity)) * Decimal(str(instr_multiplier))
-                acc_buying_power = acc_balances.derivative_buying_power if isinstance(instrument_obj, Option) else acc_balances.equity_buying_power
-
-                if current_order_value > acc_buying_power:
-                    new_adjusted_qty = int(acc_buying_power / (limit_price_to_use * Decimal(str(instr_multiplier))))
-                    if new_adjusted_qty <= 0:
-                        raise ValueError(f"Order rejected: Insufficient buying power (${acc_buying_power:,.2f}) for even 1 unit @ ${limit_price_to_use:.2f} (Value: ${limit_price_to_use * Decimal(str(instr_multiplier)):,.2f})")
-                    logger.warning(
-                        f"{log_prefix}Reduced order quantity from {initial_quantity_arg} to {new_adjusted_qty} "
-                        f"due to buying power limit (${acc_buying_power:,.2f} < ${current_order_value:,.2f})"
-                    )
-                    adjusted_trade_quantity = new_adjusted_qty
-            else:  # Sell to Close
-                acc_positions = await account_to_use.a_get_positions(session_to_use)
-                current_pos = next((p for p in acc_positions if p.symbol == instrument_obj.symbol), None)
-                if not current_pos:
-                    raise ValueError(f"No open position found for {instrument_obj.symbol} to sell.")
-
-                live_acc_orders = await account_to_use.a_get_live_orders(session_to_use)
-                current_pending_sell_qty = sum(
-                    sum(leg.quantity for leg in order.legs if leg.symbol == instrument_obj.symbol and leg.action == OrderAction.SELL_TO_CLOSE)
-                    for order in live_acc_orders
-                    if order.status in (OrderStatus.LIVE, OrderStatus.RECEIVED) and
-                       order.legs and
-                       any(leg.symbol == instrument_obj.symbol and leg.action == OrderAction.SELL_TO_CLOSE for leg in order.legs)
-                )
-
-                current_available_qty = current_pos.quantity - current_pending_sell_qty
-                logger.info(
-                    f"{log_prefix}Position: {current_pos.quantity}, Pending sells: {current_pending_sell_qty}, Available: {current_available_qty}"
-                )
-                if current_available_qty <= 0:
-                    raise ValueError(
-                        f"Cannot place sell order - entire position of {current_pos.quantity} "
-                        f"already has pending sell orders ({current_pending_sell_qty}) or is zero."
-                    )
-                if adjusted_trade_quantity > current_available_qty:
-                    logger.warning(
-                        f"{log_prefix}Reducing sell quantity from {initial_quantity_arg} to {current_available_qty} (maximum available)"
-                    )
-                    adjusted_trade_quantity = current_available_qty
-            
-            if adjusted_trade_quantity <= 0:
-                raise ValueError(f"Calculated trade quantity ({adjusted_trade_quantity}) is zero or less after pre-trade checks.")
-            final_trade_quantity = adjusted_trade_quantity
-
-            # Order Placement
-            order_act_enum = OrderAction.BUY_TO_OPEN if action == "Buy to Open" else OrderAction.SELL_TO_CLOSE
-            order_leg: Leg = instrument_obj.build_leg(final_trade_quantity, order_act_enum)
-            
-            price_effect_val = PriceEffect.DEBIT if action == "Buy to Open" else PriceEffect.CREDIT
-
-            logger.info(
-                f"{log_prefix}Attempting order placement: "
-                f"{action} {final_trade_quantity} {instrument_obj.symbol} @ ${limit_price_to_use:.2f} ({price_effect_val.value})"
-            )
-            new_order_details = NewOrder(
-                time_in_force=OrderTimeInForce.DAY,
-                order_type=OrderType.LIMIT,
-                legs=[order_leg],
-                price=limit_price_to_use,
-                price_effect=price_effect_val
-            )
-
-            placement_response = await account_to_use.a_place_order(session_to_use, new_order_details, dry_run=dry_run)
-
-            if not placement_response.errors:
-                order_id_str = "N/A - Dry Run"
-                if not dry_run and placement_response.order and placement_response.order.id:
-                    order_id_str = placement_response.order.id
-                
-                success_msg = f"Order placement successful: {action} {final_trade_quantity} {instrument_obj.symbol} @ ${limit_price_to_use:.2f} (ID: {order_id_str})"
-                if placement_response.warnings:
-                    success_msg += "\nWarnings:\n" + "\n".join(str(w) for w in placement_response.warnings)
-                logger.info(f"{log_prefix}{success_msg}")
-                return True, success_msg
-            else:
-                error_list_str = "\n".join(str(e) for e in placement_response.errors)
-                fail_msg = f"Order placement failed for {action} {final_trade_quantity} {instrument_obj.symbol} @ ${limit_price_to_use:.2f}:\n{error_list_str}"
-                logger.error(f"{log_prefix}{fail_msg}")
-                return False, fail_msg
-
-        except ValueError as val_err: 
-            logger.error(f"{log_prefix}Trade setup/check error: {str(val_err)}")
-            return False, f"Trade setup/check error: {str(val_err)}"
-        except Exception as gen_err: 
-            logger.exception(f"{log_prefix}Unexpected error during trade logic for {instrument_obj.symbol if 'instrument_obj' in locals() else underlying_symbol}")
-            return False, f"Unexpected error during trade logic: {str(gen_err)}"
-    # --- End of _execute_core_trade inner function ---
-
-    if not dry_run and not is_market_open():
-        desc_parts_msg = [action, str(quantity), underlying_symbol]
+    # Check market status for non-dry runs
+    if not dry_run and not _get_market_status()[0]:
+        desc = f"{action} {quantity} {underlying_symbol}"
         if option_type and strike_price and expiration_date:
-             desc_parts_msg.extend([f"{option_type}{strike_price}", f"exp {expiration_date}"])
-        description_msg = " ".join(desc_parts_msg)
-        return f"Market is closed. Trade '{description_msg}' not placed. Please try again when the market is open or use dry_run=True."
+            desc += f" {option_type}{strike_price} exp {expiration_date}"
+        raise ValueError(f"Market is closed. Trade '{desc}' not placed. Use dry_run=True to test.")
 
-    # Create instrument outside the lock to release it faster if instrument creation fails
-    try:
-        instrument = await _create_instrument(
-            session=session_to_use,
-            underlying_symbol=underlying_symbol,
-            expiration_date=parsed_expiration_date,
-            option_type=option_type,
-            strike_price=strike_price
-        )
-        if instrument is None:
-            error_msg_instr = f"Could not create instrument for symbol: {underlying_symbol}"
-            if parsed_expiration_date:
-                error_msg_instr += f" with expiration {expiration_date}, type {option_type}, strike {strike_price}"
-            return f"{log_prefix}Error: {error_msg_instr}"
-    except Exception as e_instr:
-        logger.exception(f"{log_prefix}Error creating instrument for {underlying_symbol}")
-        return f"{log_prefix}Error creating instrument: {str(e_instr)}"
+    # Parse expiration date if provided
+    exp_date = datetime.strptime(expiration_date, "%Y-%m-%d") if expiration_date else None
 
-    async with trade_execution_lock: # Lock for immediate execution
-        try:
-            user_price_decimal = Decimal(str(order_price)) if order_price is not None else None
-            _success, message = await _execute_core_trade(instrument, user_price_decimal)
-            return message 
-        except Exception as e_immediate: 
-            logger.exception(f"{log_prefix}Unexpected error during trade execution (within lock): {e_immediate}")
-            return f"Trade execution failed unexpectedly (wrapper): {str(e_immediate)}"
+    # Create instrument
+    instrument = await _create_instrument(
+        ctx_data.session, underlying_symbol, exp_date, option_type, strike_price
+    )
+    if not instrument:
+        raise ValueError(f"Could not create instrument for {underlying_symbol}")
 
+    # Determine limit price
+    user_price = Decimal(str(order_price)) if order_price else None
+    limit_price = await _determine_limit_price(ctx_data.session, instrument, action, user_price)
+
+    # Place order directly with the requested quantity
+    return await _place_order(ctx_data.account, ctx_data.session, instrument, action, quantity, limit_price, dry_run, ctx_data)
 
 @mcp.tool()
 async def get_nlv_history(
@@ -368,7 +414,7 @@ async def get_nlv_history(
     """
     lifespan_ctx: ServerContext = ctx.request_context.lifespan_context
     if not lifespan_ctx.session or not lifespan_ctx.account:
-        return "Error: Tastytrade session not available. Check server logs."
+        raise ValueError("Tastytrade session not available. Check server logs.")
 
     history = await lifespan_ctx.account.a_get_net_liquidating_value_history(lifespan_ctx.session, time_back=time_back)
     if not history or len(history) == 0:
@@ -405,58 +451,6 @@ async def get_nlv_history(
     return "\n".join(output)
 
 @mcp.tool()
-async def get_account_balances(ctx: Context) -> str:
-    """Retrieve current account cash balance, buying power, and net liquidating value.
-
-    Note: Net Liquidating Value may be inaccurate when the market is closed.
-    """
-    lifespan_ctx: ServerContext = ctx.request_context.lifespan_context
-    if not lifespan_ctx.session or not lifespan_ctx.account:
-        return "Error: Tastytrade session not available. Check server logs."
-
-    balances = await lifespan_ctx.account.a_get_balances(lifespan_ctx.session)
-    return (
-        f"Account Balances:\n"
-        f"Cash Balance: ${float(balances.cash_balance):,.2f}\n"
-        f"Equity Buying Power: ${float(balances.equity_buying_power):,.2f}\n"
-        f"Derivative Buying Power: ${float(balances.derivative_buying_power):,.2f}\n"
-        f"Net Liquidating Value: ${float(balances.net_liquidating_value):,.2f}\n"
-        f"Maintenance Excess: ${float(balances.maintenance_excess):,.2f}"
-    )
-
-@mcp.tool()
-async def get_current_positions(ctx: Context) -> str:
-    """List all currently open stock and option positions with current values.
-
-    Note: Mark price and calculated value may be inaccurate when the market is closed.
-    """
-    lifespan_ctx: ServerContext = ctx.request_context.lifespan_context
-
-    positions = await lifespan_ctx.account.a_get_positions(lifespan_ctx.session, include_marks=True)
-    if not positions:
-        return "No open positions found."
-
-    headers = ["Symbol", "Type", "Quantity", "Mark Price", "Value"]
-    table_data = []
-
-    for pos in positions:
-        try:
-            table_data.append([
-                pos.symbol,
-                pos.instrument_type,
-                pos.quantity,
-                f"${pos.mark_price:,.2f}",
-                f"${pos.mark_price * pos.quantity * pos.multiplier:,.2f}"
-            ])
-        except Exception:
-            logger.warning("Skipping position due to processing error: %s", pos.symbol, exc_info=True)
-            continue
-
-    output = ["Current Positions:", ""]
-    output.append(tabulate(table_data, headers=headers, tablefmt="plain"))
-    return "\n".join(output)
-
-@mcp.tool()
 async def get_transaction_history(
     ctx: Context,
     start_date: str | None = None
@@ -469,7 +463,7 @@ async def get_transaction_history(
         try:
             date_obj = datetime.strptime(start_date, "%Y-%m-%d").date()
         except ValueError:
-            return "Invalid date format. Please use YYYY-MM-DD (e.g., '2024-01-01')"
+            raise ValueError("Invalid date format. Please use YYYY-MM-DD (e.g., '2024-01-01')")
 
     lifespan_ctx: ServerContext = ctx.request_context.lifespan_context
     transactions = await lifespan_ctx.account.a_get_history(lifespan_ctx.session, start_date=date_obj)
@@ -498,10 +492,10 @@ async def get_metrics(
 ) -> str:
     """Get market metrics for symbols (IV Rank, Beta, Liquidity, Earnings)."""
     if not isinstance(symbols, list) or not all(isinstance(s, str) for s in symbols):
-        return "Error: Input 'symbols' must be a list of strings."
+        raise ValueError("Input 'symbols' must be a list of strings.")
 
     if not symbols:
-        return "Error: No symbols provided."
+        raise ValueError("No symbols provided.")
 
     session = ctx.request_context.lifespan_context.session
     metrics_data = await metrics.a_get_market_metrics(session, symbols)
@@ -569,7 +563,7 @@ async def get_prices(
         try:
             expiry_datetime = datetime.strptime(expiration_date, "%Y-%m-%d")
         except ValueError:
-            return "Invalid expiration date format. Please use YYYY-MM-DD format"
+            raise ValueError("Invalid expiration date format. Please use YYYY-MM-DD format")
 
     session = ctx.request_context.lifespan_context.session
     instrument = await _create_instrument(
@@ -584,65 +578,23 @@ async def get_prices(
         error_msg = f"Could not find instrument for: {underlying_symbol}"
         if expiry_datetime:
             error_msg += f" {expiry_datetime.strftime('%Y-%m-%d')} {option_type} {strike_price}"
-        return error_msg
+        raise ValueError(error_msg)
 
     streamer_symbol = instrument.streamer_symbol
     if not streamer_symbol:
-        return f"Could not get streamer symbol for {instrument.symbol}"
+        raise ValueError(f"Could not get streamer symbol for {instrument.symbol}")
 
-    quote_result = await _get_quote(session, streamer_symbol)
-
-    if isinstance(quote_result, tuple):
-        bid, ask = quote_result
-        return (
-            f"Current prices for {instrument.symbol}:\n"
-            f"Bid: ${bid:.2f}\n"
-            f"Ask: ${ask:.2f}"
-        )
-    else:
-        return quote_result
-
-@mcp.tool()
-async def list_live_orders(ctx: Context) -> str:
-    """List all currently live (open) orders for the account.
-    
-    Returns a table with details of each live order including ID, symbol, action, quantity, type, and price.
-    """
-    lifespan_ctx: ServerContext = ctx.request_context.lifespan_context
-    if not lifespan_ctx.session or not lifespan_ctx.account:
-        return "Error: Tastytrade session or account not available. Check server logs."
-
-    try:
-        live_orders = await lifespan_ctx.account.a_get_live_orders(lifespan_ctx.session)
-        if not live_orders:
-            return "No live orders found."
-
-        headers = ["ID", "Symbol", "Action", "Quantity", "Type", "Price", "Status"]
-        table_data = []
-        for order in live_orders:
-            # Assuming single leg orders for simplicity in this summary table
-            leg = order.legs[0] if order.legs else None
-            table_data.append([
-                order.id or "N/A",
-                leg.symbol if leg else "N/A",
-                leg.action.value if leg and hasattr(leg.action, 'value') else (str(leg.action) if leg else "N/A"),
-                leg.quantity if leg else "N/A",
-                order.order_type.value if hasattr(order.order_type, 'value') else str(order.order_type),
-                f"${order.price:.2f}" if order.price is not None else "N/A",
-                order.status.value if hasattr(order.status, 'value') else str(order.status)
-            ])
-        
-        output = ["Live Orders:", ""]
-        output.append(tabulate(table_data, headers=headers, tablefmt="plain"))
-        return "\n".join(output)
-    except Exception as e:
-        logger.exception("Error fetching live orders")
-        return f"Error fetching live orders: {str(e)}"
+    bid, ask = await _get_quote(session, streamer_symbol)
+    return (
+        f"Current prices for {instrument.symbol}:\n"
+        f"Bid: ${bid:.2f}\n"
+        f"Ask: ${ask:.2f}"
+    )
 
 @mcp.tool()
 async def cancel_order(
-    ctx: Context, 
-    order_id: str, 
+    ctx: Context,
+    order_id: str,
     dry_run: bool = False
 ) -> str:
     """Cancel a live (open) order by its ID.
@@ -653,50 +605,37 @@ async def cancel_order(
     """
     lifespan_ctx: ServerContext = ctx.request_context.lifespan_context
     if not lifespan_ctx.session or not lifespan_ctx.account:
-        return "Error: Tastytrade session or account not available. Check server logs."
-    
+        raise ValueError("Tastytrade session or account not available. Check server logs.")
+
     if not order_id:
-        return "Error: order_id must be provided."
+        raise ValueError("order_id must be provided.")
 
-    log_prefix = f"[CancelOrder: {order_id}] "
-    logger.info(f"{log_prefix}Attempting to cancel order. Dry run: {dry_run}")
+    logger.info(f"Attempting to cancel order. Dry run: {dry_run}")
 
-    try:
-        # The Tastytrade SDK's cancel_order might not return a detailed response object for success,
-        # or it might return the cancelled order's details. We'll assume it raises an error on failure.
-        # The API docs suggest it returns the cancelled order details.
-        response = await lifespan_ctx.account.a_cancel_order(lifespan_ctx.session, int(order_id), dry_run=dry_run)
+    response = await lifespan_ctx.account.a_cancel_order(lifespan_ctx.session, int(order_id), dry_run=dry_run)
 
-        if dry_run:
-            # For dry runs, the response structure might be different or might indicate simulation.
-            # We'll provide a generic success message for dry runs if no error occurs.
-            # If `response.order.status` is available and indicates cancellation, that's even better.
-            status_msg = f" (Simulated status: {response.order.status.value})" if response and hasattr(response, 'order') and response.order else ""
-            success_msg = f"Dry run: Successfully processed cancellation request for order ID {order_id}{status_msg}."
-            logger.info(f"{log_prefix}{success_msg}")
-            return success_msg
-        
-        # For actual cancellation, check response details if available
-        if response and response.order and response.order.status in [OrderStatus.CANCELLED, OrderStatus.REPLACED]: # Replaced also implies original was cancelled
-            success_msg = f"Successfully cancelled order ID {order_id}. New status: {response.order.status.value}"
-            logger.info(f"{log_prefix}{success_msg}")
-            return success_msg
-        elif response and response.order: # Order found but not cancelled as expected
-            warn_msg = f"Order ID {order_id} processed but current status is {response.order.status.value}. Expected Cancelled."
-            logger.warning(f"{log_prefix}{warn_msg}")
-            return warn_msg
-        else: # Fallback if response is not as expected
-            # This case handles if a_cancel_order returns None or an unexpected structure on success
-            # Some APIs might return a 204 No Content or an empty body on successful deletion.
-            # Assuming if no error is raised, it was successful if API behaves that way.
-            logger.info(f"{log_prefix}Cancellation request for order ID {order_id} processed without error, but response structure was not detailed. Assuming success.")
-            return f"Cancellation request for order ID {order_id} processed. Please verify status."
+    if dry_run:
+        status_msg = f" (Simulated status: {response.order.status.value})" if response and hasattr(response, 'order') and response.order else ""
+        success_msg = f"Dry run: Successfully processed cancellation request for order ID {order_id}{status_msg}."
+        logger.info(f"{success_msg}")
+        return success_msg
 
-    except Exception as e:
-        # This will catch errors from the SDK, e.g., order not found, not cancellable, network issues.
-        error_msg = f"Failed to cancel order ID {order_id}: {str(e)}"
-        logger.exception(f"{log_prefix}{error_msg}")
-        return error_msg
+    # For actual cancellation, check response details if available
+    if response and response.order and response.order.status in [OrderStatus.CANCELLED, OrderStatus.REPLACED]:
+        # Update cache after successful cancellation
+        await _update_account_data(lifespan_ctx)
+        success_msg = f"Successfully cancelled order ID {order_id}. New status: {response.order.status.value}"
+        logger.info(f"{success_msg}")
+        return success_msg
+    elif response and response.order:
+        warn_msg = f"Order ID {order_id} processed but current status is {response.order.status.value}. Expected Cancelled."
+        logger.warning(f"{warn_msg}")
+        return warn_msg
+    else:
+        # Update cache anyway in case the cancellation was successful
+        await _update_account_data(lifespan_ctx)
+        logger.info(f"Cancellation request for order ID {order_id} processed without error, but response structure was not detailed. Assuming success.")
+        return f"Cancellation request for order ID {order_id} processed. Please verify status."
 
 @mcp.tool()
 async def modify_order(
@@ -706,143 +645,97 @@ async def modify_order(
     new_price: float | None = None,
     dry_run: bool = False
 ) -> str:
-    """Modify a live (open) order's quantity or price by its ID.
-    At least one of new_quantity or new_price must be provided.
+    """Modify a live order's quantity or price by ID.
 
     Args:
-        order_id: The ID of the order to modify.
-        new_quantity: Optional. The new quantity for the order.
-        new_price: Optional. The new limit price for the order.
-        dry_run: Test without executing if True.
+        order_id: The ID of the order to modify
+        new_quantity: New quantity for the order
+        new_price: New limit price for the order
+        dry_run: Test without executing if True
     """
-    lifespan_ctx: ServerContext = ctx.request_context.lifespan_context
-    session_to_use = lifespan_ctx.session
-    account_to_use = lifespan_ctx.account
+    context: ServerContext = ctx.request_context.lifespan_context
 
-    if not session_to_use or not account_to_use:
-        return "Error: Tastytrade session or account not available. Check server logs."
+    if not context.session or not context.account:
+        raise ValueError("Tastytrade session not available. Check server logs.")
 
     if not order_id:
-        return "Error: order_id must be provided."
+        raise ValueError("order_id must be provided.")
     if new_quantity is None and new_price is None:
-        return "Error: At least one of new_quantity or new_price must be provided for modification."
+        raise ValueError("At least one of new_quantity or new_price must be provided.")
 
-    log_prefix = f"[ModifyOrder: {order_id}] "
-    logger.info(f"{log_prefix}Attempting to modify order. New Qty: {new_quantity}, New Price: {new_price}. Dry run: {dry_run}")
+    original_order = await context.account.a_get_order(context.session, int(order_id))
+    if not original_order:
+        raise ValueError(f"Order ID {order_id} not found.")
 
-    try:
-        # 1. Fetch the original order
-        # Assuming a_get_order returns a PlacedOrder like object or similar with necessary details
-        original_order = await account_to_use.a_get_order(session_to_use, int(order_id))
-        if not original_order:
-            return f"{log_prefix}Error: Order ID {order_id} not found."
+    if original_order.status not in [OrderStatus.LIVE, OrderStatus.RECEIVED] or not original_order.editable:
+        raise ValueError(f"Order ID {order_id} is not modifiable (Status: {original_order.status.value}).")
 
-        if original_order.status not in [OrderStatus.LIVE, OrderStatus.RECEIVED] or not original_order.editable:
-            return f"{log_prefix}Error: Order ID {order_id} is not in a modifiable state (Status: {original_order.status.value}, Editable: {original_order.editable})."
-        
-        if not original_order.legs:
-            return f"{log_prefix}Error: Order ID {order_id} has no legs defined."
-        
-        # For simplicity, this example assumes single-leg orders for modification.
-        # Multi-leg order modification would require more complex leg handling.
-        if len(original_order.legs) > 1:
-            logger.warning(f"{log_prefix}Modifying multi-leg orders is complex. This tool currently best supports single-leg orders. Proceeding with first leg modification.")
-        
-        original_leg = original_order.legs[0]
+    if not original_order.legs:
+        raise ValueError(f"Order ID {order_id} has no legs defined.")
 
-        # 2. Determine new quantity and price
-        updated_quantity = Decimal(str(new_quantity)) if new_quantity is not None else original_leg.quantity
-        updated_price = Decimal(str(new_price)) if new_price is not None else original_order.price
+    if len(original_order.legs) > 1:
+        raise ValueError("Multi-leg order modification not supported.")
 
-        if updated_quantity <= 0:
-            return f"{log_prefix}Error: New quantity ({updated_quantity}) must be positive."
-        if updated_price <= Decimal(0):
-             return f"{log_prefix}Error: New price (${updated_price:.2f}) must be positive."
+    original_leg = original_order.legs[0]
+    updated_quantity = Decimal(str(new_quantity)) if new_quantity is not None else original_leg.quantity
+    updated_price = Decimal(str(new_price)) if new_price is not None else original_order.price
 
-        # 3. Reconstruct the leg(s) if quantity changed or to ensure correct structure
-        # We need an instrument object to build the leg correctly.
-        # The original_leg provides symbol and instrument_type. Expiration, strike, option_type might be needed for options.
-        # This part can be tricky if original_order doesn't give full instrument spec for _create_instrument.
-        # Let's assume original_leg.symbol is the OCC symbol for options, or ticker for equity.
-        
-        # A simplified approach: if tastytrade.order.Leg can be constructed directly
-        # with just updated quantity and existing action/symbol for replacement.
-        # However, NewOrder expects legs built via instrument.build_leg().
+    if updated_quantity <= 0:
+        raise ValueError("New quantity must be positive.")
+    if updated_price <= Decimal(0):
+        raise ValueError("New price must be positive.")
 
-        # We need to get the instrument details to rebuild the leg for NewOrder
-        # This is a simplification; a robust solution would parse original_leg.symbol to get underlying, exp, strike, type for options
-        # For now, let's assume we can get/recreate the instrument based on type and symbol from original_leg
-        temp_instrument_symbol = original_leg.symbol # This might be an option OCC symbol
-        is_option = original_leg.instrument_type == "Option" # Assuming InstrumentType enum or string
-        
-        # This is a placeholder for robust instrument recreation logic
-        # For equity, original_leg.symbol is fine. For options, OCC parsing is needed.
-        # For now, we will assume _create_instrument can handle OCC symbols directly if passed as underlying
-        # OR that we primarily modify equities with this simplified version.
-        
-        # The following is a HACK/SIMPLIFICATION for instrument re-creation. 
-        # A proper implementation needs to parse Option OCC symbols if `original_leg.symbol` is one.
-        # If `_create_instrument` is smart enough to take an OCC symbol as `underlying_symbol` when other option params are None, this might work.
-        # Or, one would need to parse the OCC symbol from original_leg.symbol into its components.
-        logger.debug(f"{log_prefix}Re-creating instrument for leg: {original_leg.symbol}, Type: {original_leg.instrument_type}")
-        instrument_for_leg = await _create_instrument(
-            session=session_to_use,
-            underlying_symbol=original_leg.symbol, # This is the key simplification/potential issue for options.
-            # For options, we'd ideally parse original_leg.symbol into components and pass them to _create_instrument
-            # expiration_date=..., option_type=..., strike_price=... (if we parse from OCC)
+    instrument = await _create_instrument(context.session, original_leg.symbol)
+    if not instrument:
+        raise ValueError(f"Could not recreate instrument for {original_leg.symbol}.")
+
+    modified_order = NewOrder(
+        time_in_force=original_order.time_in_force,
+        order_type=original_order.order_type,
+        legs=[instrument.build_leg(updated_quantity, original_leg.action)],
+        price=updated_price,
+        price_effect=original_order.price_effect
+    )
+
+    response = await context.account.a_replace_order(
+        context.session,
+        int(order_id),
+        modified_order,
+        dry_run=dry_run
+    )
+
+    if response.errors:
+        error_msg = "\n".join(str(e) for e in response.errors)
+        raise ValueError(f"Failed to modify order ID {order_id}:\n{error_msg}")
+
+    if not dry_run and response.order:
+        await _update_account_data(context)
+
+    new_order_id = "N/A - Dry Run" if dry_run else (response.order.id if response.order else "Unknown")
+    success_msg = f"Order ID {order_id} modified successfully. New Order ID: {new_order_id}."
+
+    if response.warnings:
+        success_msg += "\nWarnings:\n" + "\n".join(str(w) for w in response.warnings)
+
+    return success_msg
+
+@mcp.tool()
+async def check_market_status(ctx: Context) -> str:
+    """Check if the market is currently open or closed.
+
+    Returns the current market status and, if closed, when the market will next open.
+    """
+    is_open, next_open = _get_market_status()
+
+    if is_open:
+        return "Market is currently OPEN"
+    else:
+        current_time = datetime.now(ZoneInfo('America/New_York'))
+        time_until = next_open - current_time
+        next_open_formatted = next_open.strftime("%A, %B %d, %Y at %I:%M %p %Z")
+
+        return (
+            f"Market is currently CLOSED\n"
+            f"Next market open: {next_open_formatted}\n"
+            f"Time until market opens: {time_until}"
         )
-
-        if not instrument_for_leg:
-            return f"{log_prefix}Error: Could not re-create instrument for leg modification (Symbol: {original_leg.symbol}). Modification requires instrument context."
-        
-        modified_legs = [instrument_for_leg.build_leg(updated_quantity, original_leg.action)]
-
-        # 4. Construct the NewOrder object for replacement
-        # Retain original_order.price_effect, time_in_force, order_type unless explicitly changing them.
-        modified_new_order = NewOrder(
-            time_in_force=original_order.time_in_force, 
-            order_type=original_order.order_type,      
-            legs=modified_legs,
-            price=updated_price,
-            price_effect=original_order.price_effect 
-            # TODO: Add other fields like stop_trigger if original_order.order_type is STOP/STOP_LIMIT and it's present in original_order
-        )
-
-        # 5. Call replace_order
-        # The SDK documentation should be checked for the exact method name if `a_replace_order` is not it.
-        # Common names: a_replace_order, a_edit_order.
-        # Assuming `a_replace_order(session, original_order_id_int, new_order_object, dry_run)` exists.
-        logger.info(f"{log_prefix}Submitting replacement order. Details: {modified_new_order}")        
-        replacement_response = await account_to_use.a_replace_order(
-            session_to_use, 
-            int(order_id), 
-            modified_new_order, 
-            dry_run=dry_run
-        )
-
-        # 6. Handle response
-        if replacement_response and not replacement_response.errors:
-            new_order_id_str = "N/A - Dry Run"
-            if not dry_run and replacement_response.order and replacement_response.order.id:
-                new_order_id_str = replacement_response.order.id
-            
-            success_msg = f"Order ID {order_id} modified successfully. New Order ID: {new_order_id_str}."
-            if replacement_response.warnings:
-                success_msg += "\nWarnings:\n" + "\n".join(str(w) for w in replacement_response.warnings)
-            logger.info(f"{log_prefix}{success_msg}")
-            return success_msg
-        elif replacement_response and replacement_response.errors:
-            error_list_str = "\n".join(str(e) for e in replacement_response.errors)
-            fail_msg = f"Failed to modify order ID {order_id}:\n{error_list_str}"
-            logger.error(f"{log_prefix}{fail_msg}")
-            return fail_msg
-        else:
-            # Fallback for unexpected response structure
-            unknown_resp_msg = f"Order modification for ID {order_id} processed, but response was not in expected format. Please verify."
-            logger.warning(f"{log_prefix}{unknown_resp_msg}")
-            return unknown_resp_msg
-
-    except Exception as e:
-        error_msg = f"Error modifying order ID {order_id}: {str(e)}"
-        logger.exception(f"{log_prefix}{error_msg}")
-        return error_msg

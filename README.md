@@ -40,70 +40,127 @@ Alternatively, you can set the following environment variables:
 
 If credentials are found in both the keyring and environment variables, the keyring values will take precedence.
 
-### Tools
+## MCP Resources
 
-#### Portfolio Management
+The server exposes key account information as MCP resources that are cached and automatically updated:
 
-1. `get_nlv_history`
-   - Gets account net liquidating value (NLV) history.
-   - Input:
-     - `time_back` (string): Time period ('1d', '1m', '3m', '6m', '1y', 'all', default '1y').
-   - Returns: Formatted table with Date and Value columns.
+### Account Data Resources
 
-2. `get_account_balances`
-   - Get current account balances.
-   - Returns: Formatted string with cash balance, derivative buying power, net liquidating value, and maintenance excess.
+1. **`account://balances`** - Current account balances including:
+   - Cash balance
+   - Equity buying power
+   - Derivative buying power
+   - Net liquidating value
+   - Maintenance excess
 
-3. `get_open_positions`
-   - Get all currently open positions.
-   - Returns: Formatted table showing Symbol, Type, Quantity, Mark Price, and Value.
+2. **`account://positions`** - All currently open positions showing:
+   - Symbol, type, quantity
+   - Current mark price and total value
+   - Real-time position data
 
-4. `get_transaction_history`
-   - Get transaction history.
-   - Input:
-     - `start_date` (string, optional): Start date in YYYY-MM-DD format. Defaults to last 90 days.
-   - Returns: Formatted table showing Date, Sub Type, Description, and Value.
+3. **`account://live-orders`** - All active orders with:
+   - Order ID, symbol, action
+   - Quantity, price, order type
+   - Current status
 
-#### Trade Management
+These resources are automatically cached and refreshed every 30 seconds or when trades are executed, providing the LLM with instant access to current account information without requiring function calls.
 
-1. `schedule_trade`
-   - Schedules a stock/option trade for immediate or next-market-open execution. Uses a lock for sequential processing.
-   - Inputs:
-     - `action` (string): "Buy to Open" or "Sell to Close".
-     - `quantity` (integer): Number of shares/contracts.
-     - `underlying_symbol` (string): The underlying stock symbol.
-     - `strike` (float, optional): Option strike price.
-     - `option_type` (string, optional): "C" for calls, "P" for puts.
-     - `expiration_date` (string, optional): Option expiration date in YYYY-MM-DD format.
-     - `dry_run` (boolean): Simulate without executing (default: False).
-   - Returns: Message indicating immediate execution result (success/failure) or confirmation that the trade is scheduled (with Job ID).
+## MCP Tools
 
-2. `list_scheduled_trades`
-   - List trades currently scheduled (waiting for market open/lock) or actively processing.
-   - Returns: Formatted string listing Job ID and description for each relevant trade.
+### Trade Management
 
-3. `cancel_scheduled_trade`
-   - Cancel a trade previously scheduled for future execution (status must be 'scheduled').
-   - Input:
-     - `job_id` (string): ID of the scheduled job to cancel.
-   - Returns: Confirmation or error message.
+1. **`place_trade`** - Execute stock/option trades
+   - **Parameters:**
+     - `action`: "Buy to Open" or "Sell to Close"
+     - `quantity`: Number of shares/contracts
+     - `underlying_symbol`: Stock ticker symbol
+     - `strike_price`: Option strike price (required for options)
+     - `option_type`: "C" for calls, "P" for puts (required for options)
+     - `expiration_date`: Option expiry in YYYY-MM-DD format (required for options)
+     - `order_price`: Optional limit price (defaults to mid-price if not specified)
+     - `dry_run`: Test without executing (default: False)
+   - **Features:**
+     - Automatic mid-price calculation when no price specified
+     - Price validation against bid-ask spread
+     - Market hours validation (prevents live trades when market closed)
+     - Supports both stocks and options
 
-#### Market Analysis
+2. **`cancel_order`** - Cancel a live order by ID
+   - **Parameters:**
+     - `order_id`: The ID of the order to cancel
+     - `dry_run`: Test without executing (default: False)
+   - **Features:**
+     - Validates order exists and is cancellable
+     - Updates account cache after successful cancellation
 
-1. `get_metrics`
-   - Get market metrics for specified symbols.
-   - Input:
-     - `symbols` (list[string]): List of stock symbols.
-   - Returns: Formatted table showing IV Rank, IV Percentile, Beta, Liquidity Rating, Lendability, and Earnings info (when available).
+3. **`modify_order`** - Modify a live order's quantity or price
+   - **Parameters:**
+     - `order_id`: The ID of the order to modify
+     - `new_quantity`: New quantity for the order (optional)
+     - `new_price`: New limit price for the order (optional)
+     - `dry_run`: Test without executing (default: False)
+   - **Features:**
+     - At least one of new_quantity or new_price must be provided
+     - Validates order is modifiable
+     - Only supports single-leg orders
+     - Updates account cache after successful modification
 
-2. `get_prices`
-   - Get current bid/ask prices for a stock or a specific option contract.
-   - Input:
-     - `underlying_symbol` (string): Stock ticker symbol.
-     - `expiration_date` (string, optional): Option expiry in YYYY-MM-DD format.
-     - `option_type` (string, optional): "C" for Call, "P" for Put.
-     - `strike` (float, optional): Option strike price.
-   - Returns: Formatted string with current bid and ask prices, or an error message.
+### Portfolio Analysis
+
+1. **`get_nlv_history`** - Account net liquidating value history
+   - **Parameters:**
+     - `time_back`: Time period ('1d', '1m', '3m', '6m', '1y', 'all') - default: '1y'
+   - **Returns:** Formatted table with Date, Open, High, Low, Close columns
+   - **Features:** Data sorted by date (most recent first)
+
+2. **`get_transaction_history`** - Account transaction history
+   - **Parameters:**
+     - `start_date`: Start date in YYYY-MM-DD format (optional, defaults to last 90 days)
+   - **Returns:** Formatted table with Date, Sub Type, Description, Value columns
+   - **Features:** Comprehensive transaction details including fees and adjustments
+
+### Market Data & Information
+
+1. **`get_metrics`** - Market metrics for symbols
+   - **Parameters:**
+     - `symbols`: List of stock symbols
+   - **Returns:** Table with IV Rank, IV Percentile, Beta, Liquidity, Lendability, Earnings data
+   - **Features:**
+     - Implied volatility rankings and percentiles
+     - Liquidity ratings and stock lendability
+     - Upcoming earnings information with time of day
+
+2. **`get_prices`** - Current bid/ask prices for stocks or options
+   - **Parameters:**
+     - `underlying_symbol`: Stock ticker symbol
+     - `expiration_date`: Option expiry in YYYY-MM-DD format (for options)
+     - `option_type`: "C" for calls, "P" for puts (for options)
+     - `strike_price`: Option strike price (for options)
+   - **Returns:** Current bid and ask prices
+   - **Features:**
+     - Real-time streaming quotes via DXLink
+     - Supports both stocks and options
+     - Note: May return stale data when market is closed
+
+### Market Status
+
+1. **`check_market_status`** - Check if market is currently open or closed
+   - **Parameters:** None
+   - **Returns:** Current market status and next open time if closed
+   - **Features:**
+     - Uses NYSE calendar for accurate market hours
+     - Shows time remaining until next market open
+     - Provides comprehensive market timing information
+
+## Architecture Benefits
+
+- **Efficient**: Account data available as cached resources (no repeated API calls)
+- **Real-time**: Resources automatically updated after trades and every 30 seconds
+- **Intelligent**: Automatic price discovery using mid-price when no price specified
+- **Safe**: Market hours validation prevents accidental after-hours trading
+- **Transparent**: Clear error messages and validation feedback
+- **Fast**: Direct access to account data without function calls
+- **Comprehensive**: Full trading lifecycle from analysis to execution to monitoring
 
 ## Usage with Claude Desktop
 
@@ -113,14 +170,44 @@ Add this to your `claude_desktop_config.json`:
 {
   "mcpServers": {
     "tastytrade": {
-      "command": "path/to/uvx/command/uvx",
+      "command": "uvx",
       "args": ["tasty-agent"]
     }
   }
 }
 ```
 
-**Important**: Scheduled trades will only execute while Claude Desktop is running. When Claude Desktop is closed, the server shuts down and trades are not executed.
+## Example Workflows
+
+### Basic Stock Trading
+```
+"Buy 100 shares of AAPL at market price"
+→ Uses place_trade with automatic mid-price calculation
+
+"Check my current positions"
+→ Uses account://positions resource
+
+"Cancel order 12345"
+→ Uses cancel_order tool
+```
+
+### Options Trading
+```
+"Buy 5 TSLA call options, strike 250, expiring 2024-12-20"
+→ Uses place_trade with option parameters
+
+"Get current price for TSLA Dec 20 250 calls"
+→ Uses get_prices with option parameters
+```
+
+### Portfolio Analysis
+```
+"Show my account performance over the last 6 months"
+→ Uses get_nlv_history with time_back='6m'
+
+"What are my transactions from the beginning of this year?"
+→ Uses get_transaction_history with start_date='2024-01-01'
+```
 
 ## Debugging
 
@@ -146,10 +233,10 @@ For local development testing:
 {
   "mcpServers": {
     "tastytrade": {
-      "command": "path/to/uv/command/uv",
+      "command": "uv",
       "args": [
         "--directory",
-        "path/to/tasty-agent",
+        "/path/to/tasty-agent",
         "run",
         "tasty-agent"
       ]
@@ -157,6 +244,13 @@ For local development testing:
   }
 }
 ```
+
+## Security Notes
+
+- Credentials are stored securely in system keyring
+- All trades can be tested with `dry_run=True` before execution
+- Market hours validation prevents accidental after-hours trading
+- Order validation ensures only valid, executable orders are placed
 
 ## License
 
