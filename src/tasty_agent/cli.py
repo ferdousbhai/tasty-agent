@@ -21,7 +21,7 @@ def auth() -> bool:
         keyring.set_password("tastytrade", "password", password)
 
         session = Session(username, password)
-        accounts = Account.get_accounts(session)
+        accounts = Account.get(session)
 
         if len(accounts) > 1:
             # Show account selection table
@@ -34,7 +34,7 @@ def auth() -> bool:
                 table.add_row(
                     str(idx),
                     account.account_number,
-                    getattr(account, 'name', 'Main Account')  # Fallback if name not available
+                    getattr(account, 'nickname', 'Main Account')  # Use nickname instead of name
                 )
 
             console.print(table)
