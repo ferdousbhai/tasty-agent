@@ -21,17 +21,22 @@ Or set environment variables:
 - `TASTYTRADE_PASSWORD`
 - `TASTYTRADE_ACCOUNT_ID` (optional - uses first account if multiple)
 
-## MCP Resources
-
-Account data exposed as cached resources (automatically updated after trade operations):
-
-1. **`account://balances`** - Cash balance, buying power, net liquidating value, maintenance excess
-2. **`account://positions`** - All open stock and option positions with quantities, mark prices, and values
-3. **`account://live-orders`** - Active orders with IDs, symbols, actions, quantities, types, prices, and status
-
-*Note: Resource data is cached for performance. Use specific tools like `get_prices` for real-time market data.*
-
 ## MCP Tools
+
+### Account Information
+- **`get_account_balances`** - Get current cash balance, buying power, net liquidating value, and maintenance excess
+  - Always returns fresh data from TastyTrade API
+  - No parameters required
+
+- **`get_current_positions`** - Get all open stock and option positions
+  - Includes symbol, type, quantity, mark price, and current value
+  - Always returns fresh data with current mark prices
+  - No parameters required
+
+- **`get_live_orders`** - Get all currently live (open) orders
+  - Shows order ID, symbol, action, quantity, type, price, and status
+  - Always returns fresh data from TastyTrade API  
+  - No parameters required
 
 ### Trading Operations
 - **`place_trade`** - Execute stock/option trades
@@ -42,14 +47,12 @@ Account data exposed as cached resources (automatically updated after trade oper
   - Parameters: action, quantity, underlying_symbol, strike_price*, option_type*, expiration_date*, order_price*, dry_run
 
 - **`cancel_order`** - Cancel live orders by ID
-  - Updates cached order data after successful cancellation
   - Dry-run testing supported
   - Parameters: order_id, dry_run
 
 - **`modify_order`** - Modify existing order quantity or price
   - Single-leg orders only
   - Validates order is editable before modification
-  - Updates cached data after successful modification
   - Parameters: order_id, new_quantity*, new_price*, dry_run
 
 ### Portfolio Analysis
@@ -84,9 +87,9 @@ Account data exposed as cached resources (automatically updated after trade oper
 ## Key Features
 
 ### Performance & Efficiency
-- **Smart Caching**: Resources updated only after operations, zero unnecessary API calls
-- **Batch Operations**: Parallel data fetching for optimal performance
+- **Fresh Data**: Account information always fetched live from TastyTrade API
 - **Efficient Streaming**: Real-time quotes via DXLink WebSocket
+- **Optimized Operations**: Direct API calls minimize latency
 
 ### Safety & Validation
 - **Market Hours Protection**: Prevents live trades when market is closed
@@ -126,7 +129,7 @@ Add to `claude_desktop_config.json`:
 
 ### Order Management
 ```
-"Show my live orders"
+"Get my live orders"
 "Cancel order 12345"
 "Change order 67890 quantity to 200 shares"
 "Modify order 11111 price to $150"
@@ -134,8 +137,8 @@ Add to `claude_desktop_config.json`:
 
 ### Portfolio Analysis
 ```
-"Show my current positions"
-"What's my account balance and buying power?"
+"Get my current positions"
+"Get my account balance and buying power"
 "Get my portfolio performance over the last 6 months"
 "Show transaction history from 2024-01-01"
 ```

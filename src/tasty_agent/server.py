@@ -13,7 +13,6 @@ from zoneinfo import ZoneInfo
 from mcp.server.fastmcp import FastMCP, Context
 from exchange_calendars import get_calendar
 from tastytrade import Session, Account, metrics
-from tastytrade.account import AccountBalance, CurrentPosition, PlacedOrder
 from tastytrade.dxfeed import Quote
 from tastytrade.instruments import Option, Equity, NestedOptionChain
 from tastytrade.order import NewOrder, OrderStatus, OrderAction, OrderTimeInForce, OrderType, Leg, PriceEffect
@@ -26,11 +25,6 @@ logger = logging.getLogger(__name__)
 class ServerContext:
     session: Session | None
     account: Account | None
-    # Store raw objects directly
-    balances: AccountBalance | None = None
-    positions: list[CurrentPosition] | None = None
-    live_orders: list[PlacedOrder] | None = None
-    last_update: datetime | None = None
 
 @asynccontextmanager
 async def lifespan(_server: FastMCP) -> AsyncIterator[ServerContext]:
@@ -68,44 +62,19 @@ async def lifespan(_server: FastMCP) -> AsyncIterator[ServerContext]:
         account=account,
     )
 
-    # Initial data load
-    try:
-        balances, positions, live_orders = await asyncio.gather(
-            account.a_get_balances(session),
-            account.a_get_positions(session, include_marks=True),
-            account.a_get_live_orders(session)
-        )
-        context.balances = balances
-        context.positions = positions
-        context.live_orders = live_orders
-        context.last_update = datetime.now()
-        logger.info("Loaded initial account data")
-    except Exception as e:
-        logger.error(f"Failed to load initial account data: {e}")
-
+    logger.info("TastyTrade MCP server is ready to handle requests")
     yield context
 
 mcp = FastMCP("TastyTrade", lifespan=lifespan)
 
-# Add this after the lifespan function and before the mcp resources
-def get_server_context() -> ServerContext:
-    """Get the current server context from the MCP instance."""
-    return mcp.request_context.lifespan_context
+# --- MCP Server Tools ---
 
-# Add MCP resources
-@mcp.resource("account://balances")
-async def get_account_balances() -> str:
-    """Current account cash balance, buying power, and net liquidating value.
+@mcp.tool()
+async def get_account_balances(ctx: Context) -> str:
+    """Get current account cash balance, buying power, and net liquidating value."""
+    context: ServerContext = ctx.request_context.lifespan_context
 
-    Note: Balance data is only updated after successful trade execution.
-    For real-time portfolio value, use refresh_positions to get current mark prices.
-    """
-    context = get_server_context()
-
-    if not context.balances:
-        return "Account balances unavailable"
-
-    balances = context.balances
+    balances = await context.account.a_get_balances(context.session)
     return (
         f"Account Balances:\n"
         f"Cash Balance: ${float(balances.cash_balance):,.2f}\n"
@@ -115,22 +84,20 @@ async def get_account_balances() -> str:
         f"Maintenance Excess: ${float(balances.maintenance_excess):,.2f}"
     )
 
-@mcp.resource("account://positions")
-async def get_current_positions() -> str:
-    """All currently open stock and option positions with current values.
+@mcp.tool()
+async def get_current_positions(ctx: Context) -> str:
+    """Get all currently open stock and option positions with current values."""
+    context: ServerContext = ctx.request_context.lifespan_context
 
-    Note: Position quantities are only updated after successful trades.
-    For current mark prices, use the get_prices tool.
-    """
-    context = get_server_context()
-
-    if not context.positions:
+    positions = await context.account.a_get_positions(context.session, include_marks=True)
+    
+    if not positions:
         return "No open positions found."
 
     headers = ["Symbol", "Type", "Quantity", "Mark Price", "Value"]
     table_data = []
 
-    for pos in context.positions:
+    for pos in positions:
         value = None
         if pos.mark_price:
             value = float(pos.mark_price * pos.quantity * pos.multiplier)
@@ -147,22 +114,20 @@ async def get_current_positions() -> str:
     output.append(tabulate(table_data, headers=headers, tablefmt="plain"))
     return "\n".join(output)
 
-@mcp.resource("account://live-orders")
-async def get_live_orders() -> str:
-    """All currently live (open) orders for the account.
+@mcp.tool()
+async def get_live_orders(ctx: Context) -> str:
+    """Get all currently live (open) orders for the account."""
+    context: ServerContext = ctx.request_context.lifespan_context
 
-    Note: Order data is only updated after order-related operations (place/cancel/modify).
-    Assumes no external order management outside this server.
-    """
-    context = get_server_context()
-
-    if not context.live_orders:
+    live_orders = await context.account.a_get_live_orders(context.session)
+    
+    if not live_orders:
         return "No live orders found."
 
     headers = ["ID", "Symbol", "Action", "Quantity", "Type", "Price", "Status"]
     table_data = []
 
-    for order in context.live_orders:
+    for order in live_orders:
         symbol = order.legs[0].symbol if order.legs else "N/A"
         action = order.legs[0].action.value if order.legs and hasattr(order.legs[0].action, 'value') else str(order.legs[0].action) if order.legs else "N/A"
         quantity = float(order.legs[0].quantity) if order.legs else "N/A"
@@ -284,7 +249,6 @@ async def _place_order(
     quantity: int,
     limit_price: Decimal,
     dry_run: bool,
-    context: ServerContext | None = None
 ) -> str:
     """Place the actual order and return result message."""
     order_action = OrderAction.BUY_TO_OPEN if action == "Buy to Open" else OrderAction.SELL_TO_CLOSE
@@ -305,20 +269,7 @@ async def _place_order(
         error_msg = "\n".join(str(e) for e in response.errors)
         return f"Order placement failed:\n{error_msg}"
 
-    # If order was successful and not a dry run, update live orders and positions
-    if not dry_run and response.order and context:
-        try:
-            balances, positions, live_orders = await asyncio.gather(
-                account.a_get_balances(session),
-                account.a_get_positions(session, include_marks=True),
-                account.a_get_live_orders(session)
-            )
-            context.balances = balances
-            context.positions = positions
-            context.live_orders = live_orders
-            context.last_update = datetime.now()
-        except Exception as e:
-            logger.warning(f"Failed to update account data after placing order: {e}")
+    # Note: Account data will be fetched fresh when needed via tools
 
     order_id = "N/A - Dry Run" if dry_run else (response.order.id if response.order else "Unknown")
     success_msg = f"Order placement successful: {action} {quantity} {instrument.symbol} @ ${limit_price:.2f} (ID: {order_id})"
@@ -380,7 +331,7 @@ async def place_trade(
     limit_price = await _determine_limit_price(ctx_data.session, instrument, action, user_price)
 
     # Place order directly with the requested quantity
-    return await _place_order(ctx_data.account, ctx_data.session, instrument, action, quantity, limit_price, dry_run, ctx_data)
+    return await _place_order(ctx_data.account, ctx_data.session, instrument, action, quantity, limit_price, dry_run)
 
 @mcp.tool()
 async def get_nlv_history(
@@ -604,18 +555,6 @@ async def cancel_order(
 
     # For actual cancellation, check response details if available
     if response and response.order and response.order.status in [OrderStatus.CANCELLED, OrderStatus.REPLACED]:
-        # Update live orders after successful cancellation
-        try:
-            balances, live_orders = await asyncio.gather(
-                lifespan_ctx.account.a_get_balances(lifespan_ctx.session),
-                lifespan_ctx.account.a_get_live_orders(lifespan_ctx.session)
-            )
-            lifespan_ctx.balances = balances
-            lifespan_ctx.live_orders = live_orders
-            lifespan_ctx.last_update = datetime.now()
-        except Exception as e:
-            logger.warning(f"Failed to update account data after cancellation: {e}")
-
         success_msg = f"Successfully cancelled order ID {order_id}. New status: {response.order.status.value}"
         logger.info(f"{success_msg}")
         return success_msg
@@ -624,18 +563,6 @@ async def cancel_order(
         logger.warning(f"{warn_msg}")
         return warn_msg
     else:
-        # Update live orders anyway in case the cancellation was successful
-        try:
-            balances, live_orders = await asyncio.gather(
-                lifespan_ctx.account.a_get_balances(lifespan_ctx.session),
-                lifespan_ctx.account.a_get_live_orders(lifespan_ctx.session)
-            )
-            lifespan_ctx.balances = balances
-            lifespan_ctx.live_orders = live_orders
-            lifespan_ctx.last_update = datetime.now()
-        except Exception as e:
-            logger.warning(f"Failed to update account data after cancellation: {e}")
-
         logger.info(f"Cancellation request for order ID {order_id} processed without error, but response structure was not detailed. Assuming success.")
         return f"Cancellation request for order ID {order_id} processed. Please verify status."
 
@@ -710,17 +637,7 @@ async def modify_order(
         error_msg = "\n".join(str(e) for e in response.errors)
         raise ValueError(f"Failed to modify order ID {order_id}:\n{error_msg}")
 
-    if not dry_run and response.order:
-        try:
-            balances, live_orders = await asyncio.gather(
-                context.account.a_get_balances(context.session),
-                context.account.a_get_live_orders(context.session)
-            )
-            context.balances = balances
-            context.live_orders = live_orders
-            context.last_update = datetime.now()
-        except Exception as e:
-            logger.warning(f"Failed to update account data after modification: {e}")
+    # Note: Account data will be fetched fresh when needed via tools
 
     new_order_id = "N/A - Dry Run" if dry_run else (response.order.id if response.order else "Unknown")
     success_msg = f"Order ID {order_id} modified successfully. New Order ID: {new_order_id}."
