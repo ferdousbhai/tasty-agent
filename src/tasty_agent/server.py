@@ -29,10 +29,22 @@ class ServerContext:
 @asynccontextmanager
 async def lifespan(_server: FastMCP) -> AsyncIterator[ServerContext]:
     """Manages the trade state, lock, and Tastytrade session lifecycle."""
+
+    def get_credential(key: str, env_var: str) -> str | None:
+        """Get credential from keyring with fallback to environment variable."""
+        try:
+            if credential := keyring.get_password("tastytrade", key):
+                return credential
+        except Exception:  # keyring unavailable or failed
+            pass
+
+        # Fallback to environment variable
+        return os.getenv(env_var)
+
     # Get credentials from keyring or environment
-    username = keyring.get_password("tastytrade", "username") or os.getenv("TASTYTRADE_USERNAME")
-    password = keyring.get_password("tastytrade", "password") or os.getenv("TASTYTRADE_PASSWORD")
-    account_id = keyring.get_password("tastytrade", "account_id") or os.getenv("TASTYTRADE_ACCOUNT_ID")
+    username = get_credential("username", "TASTYTRADE_USERNAME")
+    password = get_credential("password", "TASTYTRADE_PASSWORD")
+    account_id = get_credential("account_id", "TASTYTRADE_ACCOUNT_ID")
 
     if not username or not password:
         raise ValueError(
@@ -90,7 +102,7 @@ async def get_current_positions(ctx: Context) -> str:
     context: ServerContext = ctx.request_context.lifespan_context
 
     positions = await context.account.a_get_positions(context.session, include_marks=True)
-    
+
     if not positions:
         return "No open positions found."
 
@@ -120,7 +132,7 @@ async def get_live_orders(ctx: Context) -> str:
     context: ServerContext = ctx.request_context.lifespan_context
 
     live_orders = await context.account.a_get_live_orders(context.session)
-    
+
     if not live_orders:
         return "No live orders found."
 
