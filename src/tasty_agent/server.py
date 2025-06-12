@@ -36,7 +36,8 @@ async def lifespan(_server: FastMCP) -> AsyncIterator[ServerContext]:
             if credential := keyring.get_password("tastytrade", key):
                 return credential
         except Exception:
-            return os.getenv(env_var) #fallback to environment variable
+            pass
+        return os.getenv(env_var) #fallback to environment variable
 
     username = get_credential("username", "TASTYTRADE_USERNAME")
     password = get_credential("password", "TASTYTRADE_PASSWORD")
