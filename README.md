@@ -35,7 +35,7 @@ Or set environment variables:
 
 - **`get_live_orders`** - Get all currently live (open) orders
   - Shows order ID, symbol, action, quantity, type, price, and status
-  - Always returns fresh data from TastyTrade API  
+  - Always returns fresh data from TastyTrade API
   - No parameters required
 
 ### Trading Operations
@@ -81,6 +81,12 @@ Or set environment variables:
   - Uses NYSE calendar for accurate trading hours
   - Shows time remaining until next market open when closed
   - No parameters required
+
+### Utilities
+- **`wait`** - Wait for a specified duration in seconds
+  - Duration limited between 1-60 seconds per call
+  - Use multiple calls for longer waits
+  - Parameters: duration_seconds (default: 60)
 
 *\* Optional parameters*
 

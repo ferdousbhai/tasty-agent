@@ -15,7 +15,7 @@ from exchange_calendars import get_calendar
 from tastytrade import Session, Account, metrics
 from tastytrade.dxfeed import Quote
 from tastytrade.instruments import Option, Equity, NestedOptionChain
-from tastytrade.order import NewOrder, OrderStatus, OrderAction, OrderTimeInForce, OrderType, Leg, PriceEffect
+from tastytrade.order import NewOrder, OrderStatus, OrderAction, OrderTimeInForce, OrderType
 from tastytrade.streamer import DXLinkStreamer
 
 logger = logging.getLogger(__name__)
@@ -28,20 +28,16 @@ class ServerContext:
 
 @asynccontextmanager
 async def lifespan(_server: FastMCP) -> AsyncIterator[ServerContext]:
-    """Manages the trade state, lock, and Tastytrade session lifecycle."""
+    """Manages Tastytrade session lifecycle."""
 
     def get_credential(key: str, env_var: str) -> str | None:
         """Get credential from keyring with fallback to environment variable."""
         try:
             if credential := keyring.get_password("tastytrade", key):
                 return credential
-        except Exception:  # keyring unavailable or failed
-            pass
+        except Exception:
+            return os.getenv(env_var) #fallback to environment variable
 
-        # Fallback to environment variable
-        return os.getenv(env_var)
-
-    # Get credentials from keyring or environment
     username = get_credential("username", "TASTYTRADE_USERNAME")
     password = get_credential("password", "TASTYTRADE_PASSWORD")
     account_id = get_credential("account_id", "TASTYTRADE_ACCOUNT_ID")
@@ -52,11 +48,9 @@ async def lifespan(_server: FastMCP) -> AsyncIterator[ServerContext]:
             "TASTYTRADE_USERNAME and TASTYTRADE_PASSWORD environment variables."
         )
 
-    # Create session and get accounts
     session = Session(username, password)
     accounts = Account.get(session)
 
-    # Select account
     if account_id:
         account = next((acc for acc in accounts if acc.account_number == account_id), None)
         if not account:
@@ -68,24 +62,17 @@ async def lifespan(_server: FastMCP) -> AsyncIterator[ServerContext]:
         else:
             logger.info(f"Using Tastytrade account: {account.account_number}")
 
-    # Create context
-    context = ServerContext(
-        session=session,
-        account=account,
-    )
-
+    context = ServerContext(session=session, account=account)
     logger.info("TastyTrade MCP server is ready to handle requests")
     yield context
 
 mcp = FastMCP("TastyTrade", lifespan=lifespan)
 
-# --- MCP Server Tools ---
 
 @mcp.tool()
 async def get_account_balances(ctx: Context) -> str:
-    """Get current account cash balance, buying power, and net liquidating value."""
-    context: ServerContext = ctx.request_context.lifespan_context
-
+    """Get account cash balance, buying power, and net liquidating value."""
+    context = ctx.request_context.lifespan_context
     balances = await context.account.a_get_balances(context.session)
     return (
         f"Account Balances:\n"
@@ -98,78 +85,58 @@ async def get_account_balances(ctx: Context) -> str:
 
 @mcp.tool()
 async def get_current_positions(ctx: Context) -> str:
-    """Get all currently open stock and option positions with current values."""
-    context: ServerContext = ctx.request_context.lifespan_context
-
+    """Get all open stock and option positions with current values."""
+    context = ctx.request_context.lifespan_context
     positions = await context.account.a_get_positions(context.session, include_marks=True)
 
     if not positions:
         return "No open positions found."
 
-    headers = ["Symbol", "Type", "Quantity", "Mark Price", "Value"]
-    table_data = []
-
-    for pos in positions:
-        value = None
-        if pos.mark_price:
-            value = float(pos.mark_price * pos.quantity * pos.multiplier)
-
-        table_data.append([
+    table_data = [
+        [
             pos.symbol,
-            pos.instrument_type.value if hasattr(pos.instrument_type, 'value') else str(pos.instrument_type),
+            getattr(pos.instrument_type, 'value', str(pos.instrument_type)),
             float(pos.quantity),
             f"${float(pos.mark_price):,.2f}" if pos.mark_price else "N/A",
-            f"${value:,.2f}" if value else "N/A"
-        ])
+            f"${float(pos.mark_price * pos.quantity * pos.multiplier):,.2f}" if pos.mark_price else "N/A"
+        ]
+        for pos in positions
+    ]
 
-    output = ["Current Positions:", ""]
-    output.append(tabulate(table_data, headers=headers, tablefmt="plain"))
-    return "\n".join(output)
+    return "Current Positions:\n\n" + tabulate(
+        table_data,
+        headers=["Symbol", "Type", "Quantity", "Mark Price", "Value"],
+        tablefmt="plain"
+    )
 
 @mcp.tool()
 async def get_live_orders(ctx: Context) -> str:
-    """Get all currently live (open) orders for the account."""
-    context: ServerContext = ctx.request_context.lifespan_context
-
+    """Get all live (open) orders for the account."""
+    context = ctx.request_context.lifespan_context
     live_orders = await context.account.a_get_live_orders(context.session)
 
     if not live_orders:
         return "No live orders found."
 
-    headers = ["ID", "Symbol", "Action", "Quantity", "Type", "Price", "Status"]
-    table_data = []
-
-    for order in live_orders:
-        symbol = order.legs[0].symbol if order.legs else "N/A"
-        action = order.legs[0].action.value if order.legs and hasattr(order.legs[0].action, 'value') else str(order.legs[0].action) if order.legs else "N/A"
-        quantity = float(order.legs[0].quantity) if order.legs else "N/A"
-
-        table_data.append([
+    table_data = [
+        [
             order.id or "N/A",
-            symbol,
-            action,
-            quantity,
-            order.order_type.value if hasattr(order.order_type, 'value') else str(order.order_type),
+            order.legs[0].symbol if order.legs else "N/A",
+            getattr(order.legs[0].action, 'value', str(order.legs[0].action)) if order.legs else "N/A",
+            float(order.legs[0].quantity) if order.legs else "N/A",
+            getattr(order.order_type, 'value', str(order.order_type)),
             f"${float(order.price):.2f}" if order.price else "N/A",
-            order.status.value if hasattr(order.status, 'value') else str(order.status)
-        ])
+            getattr(order.status, 'value', str(order.status))
+        ]
+        for order in live_orders
+    ]
 
-    output = ["Live Orders:", ""]
-    output.append(tabulate(table_data, headers=headers, tablefmt="plain"))
-    return "\n".join(output)
+    return "Live Orders:\n\n" + tabulate(
+        table_data,
+        headers=["ID", "Symbol", "Action", "Quantity", "Type", "Price", "Status"],
+        tablefmt="plain"
+    )
 
-# --- Helper Functions ---
-def _get_market_status() -> tuple[bool, datetime | None]:
-    """Get market status and next open time if market is closed."""
-    nyse = get_calendar('XNYS')  # NYSE calendar
-    current_time = datetime.now(ZoneInfo('America/New_York'))
-    is_open = nyse.is_open_on_minute(current_time)
-
-    if is_open:
-        return True, None
-
-    next_open = nyse.next_open(current_time)
-    return False, next_open
 
 async def _create_instrument(
     session: Session,
@@ -178,8 +145,7 @@ async def _create_instrument(
     option_type: Literal["C", "P"] | None = None,
     strike_price: float | None = None,
 ) -> Option | Equity | None:
-    """(Helper) Create an instrument object for a given symbol."""
-
+    """Create an instrument object for stock or option."""
     if not expiration_date or not option_type or not strike_price:
         return await Equity.a_get(session, underlying_symbol)
 
@@ -188,7 +154,6 @@ async def _create_instrument(
         return None
     option_chain = chains[0]
 
-    # Find matching expiration
     exp_date = expiration_date.date()
     if not (expiration := next(
         (exp for exp in option_chain.expirations if exp.expiration_date == exp_date), None
@@ -196,7 +161,6 @@ async def _create_instrument(
         logger.error(f"No expiration found for date {exp_date} in chain for {underlying_symbol}")
         return None
 
-    # Find matching strike
     if not (strike_obj := next(
         (s for s in expiration.strikes if float(s.strike_price) == strike_price), None
     )):
@@ -207,7 +171,7 @@ async def _create_instrument(
     return await Option.a_get(session, option_symbol)
 
 async def _get_quote(session: Session, streamer_symbol: str) -> tuple[Decimal, Decimal]:
-    """(Helper) Get current quote for a symbol via DXLinkStreamer."""
+    """Get current quote for a symbol via DXLinkStreamer."""
     try:
         async with DXLinkStreamer(session) as streamer:
             await streamer.subscribe(Quote, [streamer_symbol])
@@ -218,80 +182,6 @@ async def _get_quote(session: Session, streamer_symbol: str) -> tuple[Decimal, D
     except asyncio.CancelledError:
         raise ValueError(f"WebSocket connection interrupted for {streamer_symbol}")
 
-async def _determine_limit_price(
-    session: Session,
-    instrument: Option | Equity,
-    action: str,
-    user_price: Decimal | None
-) -> Decimal:
-    """Determine the limit price for an order, adjusting user price if necessary."""
-    bid_price, ask_price = await _get_quote(session, instrument.streamer_symbol)
-
-    if user_price is not None:
-        # Adjust user price to be within bid-ask range if necessary
-        if bid_price > Decimal(0) and ask_price > Decimal(0):
-            if user_price < bid_price:
-                logger.warning(f"Adjusted order price from ${user_price:.2f} to ${bid_price:.2f} (bid price)")
-                return bid_price
-            elif user_price > ask_price:
-                logger.warning(f"Adjusted order price from ${user_price:.2f} to ${ask_price:.2f} (ask price)")
-                return ask_price
-        logger.info(f"Using user-provided order price: ${user_price:.2f}")
-        return user_price
-
-    # Calculate mid-price when no user price provided
-    if bid_price > Decimal(0) and ask_price > Decimal(0) and ask_price >= bid_price:
-        mid_price = ((bid_price + ask_price) / 2).quantize(Decimal('0.01'))
-        logger.info(f"Using mid-price: ${mid_price:.2f}")
-        return mid_price
-
-    # Fallback to bid/ask based on action
-    fallback_price = ask_price if action == "Buy to Open" else bid_price
-    if fallback_price > Decimal(0):
-        logger.warning(f"Using {'ask' if action == 'Buy to Open' else 'bid'} price: ${fallback_price:.2f}")
-        return fallback_price
-
-    raise ValueError(f"Cannot determine valid order price. Bid: {bid_price}, Ask: {ask_price}")
-
-async def _place_order(
-    account: Account,
-    session: Session,
-    instrument: Option | Equity,
-    action: str,
-    quantity: int,
-    limit_price: Decimal,
-    dry_run: bool,
-) -> str:
-    """Place the actual order and return result message."""
-    order_action = OrderAction.BUY_TO_OPEN if action == "Buy to Open" else OrderAction.SELL_TO_CLOSE
-    price_effect = PriceEffect.DEBIT if action == "Buy to Open" else PriceEffect.CREDIT
-
-    order = NewOrder(
-        time_in_force=OrderTimeInForce.DAY,
-        order_type=OrderType.LIMIT,
-        legs=[instrument.build_leg(quantity, order_action)],
-        price=limit_price,
-        price_effect=price_effect
-    )
-
-    logger.info(f"Placing order: {action} {quantity} {instrument.symbol} @ ${limit_price:.2f}")
-    response = await account.a_place_order(session, order, dry_run=dry_run)
-
-    if response.errors:
-        error_msg = "\n".join(str(e) for e in response.errors)
-        return f"Order placement failed:\n{error_msg}"
-
-    # Note: Account data will be fetched fresh when needed via tools
-
-    order_id = "N/A - Dry Run" if dry_run else (response.order.id if response.order else "Unknown")
-    success_msg = f"Order placement successful: {action} {quantity} {instrument.symbol} @ ${limit_price:.2f} (ID: {order_id})"
-
-    if response.warnings:
-        success_msg += "\nWarnings:\n" + "\n".join(str(w) for w in response.warnings)
-
-    return success_msg
-
-# --- MCP Server Tools ---
 
 @mcp.tool()
 async def place_trade(
@@ -305,130 +195,135 @@ async def place_trade(
     order_price: float | None = None,
     dry_run: bool = False,
 ) -> str:
-    """Execute a stock/option trade.
+    """Execute a stock/option trade."""
+    context = ctx.request_context.lifespan_context
 
-    Args:
-        action: Buy to Open or Sell to Close
-        quantity: Number of shares/contracts
-        underlying_symbol: Stock ticker symbol
-        strike_price: Option strike price (if option)
-        option_type: C for Call, P for Put (if option)
-        expiration_date: Option expiry in YYYY-MM-DD format (if option)
-        order_price: Optional limit price (defaults to mid-price)
-        dry_run: Test without executing if True
-    """
-    ctx_data: ServerContext = ctx.request_context.lifespan_context
-    if not ctx_data.session or not ctx_data.account:
-        raise ValueError("Tastytrade session not available. Check server logs.")
-
-    # Check market status for non-dry runs
-    if not dry_run and not _get_market_status()[0]:
-        desc = f"{action} {quantity} {underlying_symbol}"
-        if option_type and strike_price and expiration_date:
-            desc += f" {option_type}{strike_price} exp {expiration_date}"
-        raise ValueError(f"Market is closed. Trade '{desc}' not placed. Use dry_run=True to test.")
-
-    # Parse expiration date if provided
     exp_date = datetime.strptime(expiration_date, "%Y-%m-%d") if expiration_date else None
 
-    # Create instrument
     instrument = await _create_instrument(
-        ctx_data.session, underlying_symbol, exp_date, option_type, strike_price
+        context.session, underlying_symbol, exp_date, option_type, strike_price
     )
     if not instrument:
         raise ValueError(f"Could not create instrument for {underlying_symbol}")
 
-    # Determine limit price
-    user_price = Decimal(str(order_price)) if order_price else None
-    limit_price = await _determine_limit_price(ctx_data.session, instrument, action, user_price)
+    bid_price, ask_price = await _get_quote(context.session, instrument.streamer_symbol)
 
-    # Place order directly with the requested quantity
-    return await _place_order(ctx_data.account, ctx_data.session, instrument, action, quantity, limit_price, dry_run)
+    user_price = Decimal(str(order_price)) if order_price else None
+
+    if user_price is not None:
+        if bid_price > Decimal(0) and ask_price > Decimal(0):
+            if user_price < bid_price:
+                logger.warning(f"Adjusted order price from ${user_price:.2f} to ${bid_price:.2f} (bid price)")
+                limit_price = bid_price
+            elif user_price > ask_price:
+                logger.warning(f"Adjusted order price from ${user_price:.2f} to ${ask_price:.2f} (ask price)")
+                limit_price = ask_price
+            else:
+                limit_price = user_price
+        else:
+            limit_price = user_price
+        logger.info(f"Using {'adjusted' if limit_price != user_price else 'user-provided'} order price: ${limit_price:.2f}")
+    else:
+        if bid_price > Decimal(0) and ask_price > Decimal(0) and ask_price >= bid_price:
+            limit_price = ((bid_price + ask_price) / 2).quantize(Decimal('0.01'))
+            logger.info(f"Using mid-price: ${limit_price:.2f}")
+        else:
+            fallback_price = ask_price if action == "Buy to Open" else bid_price
+            if fallback_price > Decimal(0):
+                logger.warning(f"Using {'ask' if action == 'Buy to Open' else 'bid'} price: ${fallback_price:.2f}")
+                limit_price = fallback_price
+            else:
+                raise ValueError(f"Cannot determine valid order price. Bid: {bid_price}, Ask: {ask_price}")
+
+    order_action = OrderAction.BUY_TO_OPEN if action == "Buy to Open" else OrderAction.SELL_TO_CLOSE
+
+    order = NewOrder(
+        time_in_force=OrderTimeInForce.DAY,
+        order_type=OrderType.LIMIT,
+        legs=[instrument.build_leg(quantity, order_action)],
+        price=limit_price
+    )
+
+    logger.info(f"Placing order: {action} {quantity} {instrument.symbol} @ ${limit_price:.2f}")
+    response = await context.account.a_place_order(context.session, order, dry_run=dry_run)
+
+    if response.errors:
+        error_msg = "\n".join(str(e) for e in response.errors)
+        return f"Order placement failed:\n{error_msg}"
+
+    order_id = "N/A - Dry Run" if dry_run else (response.order.id if response.order else "Unknown")
+    success_msg = f"Order placement successful: {action} {quantity} {instrument.symbol} @ ${limit_price:.2f} (ID: {order_id})"
+
+    if response.warnings:
+        success_msg += "\nWarnings:\n" + "\n".join(str(w) for w in response.warnings)
+
+    return success_msg
 
 @mcp.tool()
 async def get_nlv_history(
     ctx: Context,
     time_back: Literal['1d', '1m', '3m', '6m', '1y', 'all'] = '1y'
 ) -> str:
-    """Get Net Liquidating Value (NLV) history for the account.
-
-    Returns the data as a formatted table with Date, Open, High, Low, and Close columns.
-
-    Args:
-        time_back: Time period for history (1d=1 day, 1m=1 month, 3m=3 months, 6m=6 months, 1y=1 year, all=all time)
-    """
-    lifespan_ctx: ServerContext = ctx.request_context.lifespan_context
-    if not lifespan_ctx.session or not lifespan_ctx.account:
-        raise ValueError("Tastytrade session not available. Check server logs.")
-
-    history = await lifespan_ctx.account.a_get_net_liquidating_value_history(lifespan_ctx.session, time_back=time_back)
-    if not history or len(history) == 0:
+    """Get Net Liquidating Value (NLV) history for the account."""
+    context = ctx.request_context.lifespan_context
+    history = await context.account.a_get_net_liquidating_value_history(context.session, time_back=time_back)
+    if not history:
         return "No history data available for the selected time period."
 
-    # Format the data into a table
-    headers = ["Date", "Open ($)", "High ($)", "Low ($)", "Close ($)"]
-    # Store tuples of (date_object, formatted_date, open_str, high_str, low_str, close_str) for sorting
-    parsed_data = []
-    for n in history:
-        # Parse the date part of the time string (first 10 chars)
-        date_part = n.time[:10]
-        sort_key_date = datetime.strptime(date_part, "%Y-%m-%d").date()
-
-        # Format the date and OHLC values (using total_* fields)
-        formatted_date = sort_key_date.strftime("%Y-%m-%d")
-        open_str = f"{float(n.total_open):,.2f}"
-        high_str = f"{float(n.total_high):,.2f}"
-        low_str = f"{float(n.total_low):,.2f}"
-        close_str = f"{float(n.total_close):,.2f}" # Use total_close for NLV
-        parsed_data.append((sort_key_date, formatted_date, open_str, high_str, low_str, close_str))
-
-    # Sort by date object descending (most recent first)
-    parsed_data.sort(key=lambda item: item[0], reverse=True)
-
-    # Format for tabulate *after* sorting
-    table_data = [
-        [formatted_date, open_str, high_str, low_str, close_str]
-        for sort_key_date, formatted_date, open_str, high_str, low_str, close_str in parsed_data
+    parsed_data = [
+        (
+            datetime.strptime(n.time[:10], "%Y-%m-%d").date(),
+            n.time[:10],
+            f"{float(n.total_open):,.2f}",
+            f"{float(n.total_high):,.2f}",
+            f"{float(n.total_low):,.2f}",
+            f"{float(n.total_close):,.2f}"
+        )
+        for n in history
     ]
 
-    output = ["Net Liquidating Value History (Past {time_back}):", ""]
-    output.append(tabulate(table_data, headers=headers, tablefmt="plain"))
-    return "\n".join(output)
+    parsed_data.sort(key=lambda item: item[0], reverse=True)
+
+    table_data = [
+        [formatted_date, open_str, high_str, low_str, close_str]
+        for _, formatted_date, open_str, high_str, low_str, close_str in parsed_data
+    ]
+
+    return f"Net Liquidating Value History (Past {time_back}):\n\n" + tabulate(
+        table_data,
+        headers=["Date", "Open ($)", "High ($)", "Low ($)", "Close ($)"],
+        tablefmt="plain"
+    )
 
 @mcp.tool()
 async def get_transaction_history(
     ctx: Context,
     start_date: str | None = None
 ) -> str:
-    """Get account transaction history from start_date (YYYY-MM-DD) or last 90 days (if no date provided)."""
-    # Default to 90 days if no date provided
-    if start_date is None:
-        date_obj = date.today() - timedelta(days=90)
-    else:
-        try:
-            date_obj = datetime.strptime(start_date, "%Y-%m-%d").date()
-        except ValueError:
-            raise ValueError("Invalid date format. Please use YYYY-MM-DD (e.g., '2024-01-01')")
+    """Get account transaction history from start_date (YYYY-MM-DD) or last 90 days."""
+    date_obj = (date.today() - timedelta(days=90) if start_date is None
+                else datetime.strptime(start_date, "%Y-%m-%d").date())
 
-    lifespan_ctx: ServerContext = ctx.request_context.lifespan_context
-    transactions = await lifespan_ctx.account.a_get_history(lifespan_ctx.session, start_date=date_obj)
+    context = ctx.request_context.lifespan_context
+    transactions = await context.account.a_get_history(context.session, start_date=date_obj)
     if not transactions:
         return "No transactions found for the specified period."
 
-    headers = ["Date", "Sub Type", "Description", "Value"]
-    table_data = []
-
-    for txn in transactions:
-        table_data.append([
+    table_data = [
+        [
             txn.transaction_date.strftime("%Y-%m-%d"),
             txn.transaction_sub_type or 'N/A',
             txn.description or 'N/A',
             f"${float(txn.net_value):,.2f}" if txn.net_value is not None else 'N/A'
-        ])
+        ]
+        for txn in transactions
+    ]
 
-    output = ["Transaction History:", ""]
-    output.append(tabulate(table_data, headers=headers, tablefmt="plain"))
-    return "\n".join(output)
+    return "Transaction History:\n\n" + tabulate(
+        table_data,
+        headers=["Date", "Sub Type", "Description", "Value"],
+        tablefmt="plain"
+    )
 
 @mcp.tool()
 async def get_metrics(
@@ -436,37 +331,29 @@ async def get_metrics(
     symbols: list[str]
 ) -> str:
     """Get market metrics for symbols (IV Rank, Beta, Liquidity, Earnings)."""
-    if not isinstance(symbols, list) or not all(isinstance(s, str) for s in symbols):
-        raise ValueError("Input 'symbols' must be a list of strings.")
-
     if not symbols:
         raise ValueError("No symbols provided.")
 
-    session = ctx.request_context.lifespan_context.session
-    metrics_data = await metrics.a_get_market_metrics(session, symbols)
+    context = ctx.request_context.lifespan_context
+    metrics_data = await metrics.a_get_market_metrics(context.session, symbols)
     if not metrics_data:
         return f"No metrics found for the specified symbols: {', '.join(symbols)}"
 
-    headers = ["Symbol", "IV Rank", "IV %ile", "Beta", "Liquidity", "Lendability", "Earnings"]
     table_data = []
-
     for m in metrics_data:
-        # Process each metric, skipping any that cause errors
         try:
-            # Convert values with proper error handling
             iv_rank = f"{float(m.implied_volatility_index_rank) * 100:.1f}%" if m.implied_volatility_index_rank else "N/A"
             iv_percentile = f"{float(m.implied_volatility_percentile) * 100:.1f}%" if m.implied_volatility_percentile else "N/A"
             beta = f"{float(m.beta):.2f}" if m.beta else "N/A"
 
             earnings_info = "N/A"
-            earnings = getattr(m, "earnings", None)
-            if earnings is not None:
-                expected = getattr(earnings, "expected_report_date", None)
-                time_of_day = getattr(earnings, "time_of_day", None)
-                if expected is not None and time_of_day is not None:
+            if hasattr(m, 'earnings') and m.earnings:
+                expected = getattr(m.earnings, "expected_report_date", None)
+                time_of_day = getattr(m.earnings, "time_of_day", None)
+                if expected and time_of_day:
                     earnings_info = f"{expected} ({time_of_day})"
 
-            row = [
+            table_data.append([
                 m.symbol,
                 iv_rank,
                 iv_percentile,
@@ -474,15 +361,15 @@ async def get_metrics(
                 m.liquidity_rating or "N/A",
                 m.lendability or "N/A",
                 earnings_info
-            ]
-            table_data.append(row)
+            ])
         except Exception:
             logger.warning("Skipping metric for symbol due to processing error: %s", m.symbol, exc_info=True)
-            continue
 
-    output = ["Market Metrics:", ""]
-    output.append(tabulate(table_data, headers=headers, tablefmt="plain"))
-    return "\n".join(output)
+    return "Market Metrics:\n\n" + tabulate(
+        table_data,
+        headers=["Symbol", "IV Rank", "IV %ile", "Beta", "Liquidity", "Lendability", "Earnings"],
+        tablefmt="plain"
+    )
 
 @mcp.tool()
 async def get_prices(
@@ -492,49 +379,25 @@ async def get_prices(
     option_type: Literal["C", "P"] | None = None,
     strike_price: float | None = None,
 ) -> str:
-    """Get current bid/ask prices for stock or option.
+    """Get current bid/ask prices for stock or option."""
+    exp_date = datetime.strptime(expiration_date, "%Y-%m-%d") if expiration_date else None
 
-    Note: When the market is closed, this may return stale data or fail if the data stream is unavailable.
-
-    Args:
-        underlying_symbol: Stock ticker symbol
-        expiration_date: Option expiry in YYYY-MM-DD format (for options)
-        option_type: C for Call, P for Put (for options)
-        strike_price: Option strike price (for options)
-    """
-
-    expiry_datetime = None
-    if expiration_date:
-        try:
-            expiry_datetime = datetime.strptime(expiration_date, "%Y-%m-%d")
-        except ValueError:
-            raise ValueError("Invalid expiration date format. Please use YYYY-MM-DD format")
-
-    session = ctx.request_context.lifespan_context.session
+    context = ctx.request_context.lifespan_context
     instrument = await _create_instrument(
-        session=session,
-        underlying_symbol=underlying_symbol,
-        expiration_date=expiry_datetime,
-        option_type=option_type,
-        strike_price=strike_price
+        context.session, underlying_symbol, exp_date, option_type, strike_price
     )
 
-    if instrument is None:
+    if not instrument:
         error_msg = f"Could not find instrument for: {underlying_symbol}"
-        if expiry_datetime:
-            error_msg += f" {expiry_datetime.strftime('%Y-%m-%d')} {option_type} {strike_price}"
+        if exp_date:
+            error_msg += f" {exp_date.strftime('%Y-%m-%d')} {option_type} {strike_price}"
         raise ValueError(error_msg)
 
-    streamer_symbol = instrument.streamer_symbol
-    if not streamer_symbol:
+    if not instrument.streamer_symbol:
         raise ValueError(f"Could not get streamer symbol for {instrument.symbol}")
 
-    bid, ask = await _get_quote(session, streamer_symbol)
-    return (
-        f"Current prices for {instrument.symbol}:\n"
-        f"Bid: ${bid:.2f}\n"
-        f"Ask: ${ask:.2f}"
-    )
+    bid, ask = await _get_quote(context.session, instrument.streamer_symbol)
+    return f"Current prices for {instrument.symbol}:\nBid: ${bid:.2f}\nAsk: ${ask:.2f}"
 
 @mcp.tool()
 async def cancel_order(
@@ -542,40 +405,23 @@ async def cancel_order(
     order_id: str,
     dry_run: bool = False
 ) -> str:
-    """Cancel a live (open) order by its ID.
-
-    Args:
-        order_id: The ID of the order to cancel.
-        dry_run: Test without executing if True.
-    """
-    lifespan_ctx: ServerContext = ctx.request_context.lifespan_context
-    if not lifespan_ctx.session or not lifespan_ctx.account:
-        raise ValueError("Tastytrade session or account not available. Check server logs.")
-
+    """Cancel a live order by ID."""
     if not order_id:
         raise ValueError("order_id must be provided.")
 
+    context = ctx.request_context.lifespan_context
     logger.info(f"Attempting to cancel order. Dry run: {dry_run}")
-
-    response = await lifespan_ctx.account.a_cancel_order(lifespan_ctx.session, int(order_id), dry_run=dry_run)
+    response = await context.account.a_cancel_order(context.session, int(order_id), dry_run=dry_run)
 
     if dry_run:
-        status_msg = f" (Simulated status: {response.order.status.value})" if response and hasattr(response, 'order') and response.order else ""
-        success_msg = f"Dry run: Successfully processed cancellation request for order ID {order_id}{status_msg}."
-        logger.info(f"{success_msg}")
-        return success_msg
+        status_msg = f" (Simulated status: {response.order.status.value})" if response and response.order else ""
+        return f"Dry run: Successfully processed cancellation request for order ID {order_id}{status_msg}."
 
-    # For actual cancellation, check response details if available
     if response and response.order and response.order.status in [OrderStatus.CANCELLED, OrderStatus.REPLACED]:
-        success_msg = f"Successfully cancelled order ID {order_id}. New status: {response.order.status.value}"
-        logger.info(f"{success_msg}")
-        return success_msg
+        return f"Successfully cancelled order ID {order_id}. New status: {response.order.status.value}"
     elif response and response.order:
-        warn_msg = f"Order ID {order_id} processed but current status is {response.order.status.value}. Expected Cancelled."
-        logger.warning(f"{warn_msg}")
-        return warn_msg
+        return f"Order ID {order_id} processed but current status is {response.order.status.value}. Expected Cancelled."
     else:
-        logger.info(f"Cancellation request for order ID {order_id} processed without error, but response structure was not detailed. Assuming success.")
         return f"Cancellation request for order ID {order_id} processed. Please verify status."
 
 @mcp.tool()
@@ -586,24 +432,13 @@ async def modify_order(
     new_price: float | None = None,
     dry_run: bool = False
 ) -> str:
-    """Modify a live order's quantity or price by ID.
-
-    Args:
-        order_id: The ID of the order to modify
-        new_quantity: New quantity for the order
-        new_price: New limit price for the order
-        dry_run: Test without executing if True
-    """
-    context: ServerContext = ctx.request_context.lifespan_context
-
-    if not context.session or not context.account:
-        raise ValueError("Tastytrade session not available. Check server logs.")
-
+    """Modify a live order's quantity or price by ID."""
     if not order_id:
         raise ValueError("order_id must be provided.")
     if new_quantity is None and new_price is None:
         raise ValueError("At least one of new_quantity or new_price must be provided.")
 
+    context = ctx.request_context.lifespan_context
     original_order = await context.account.a_get_order(context.session, int(order_id))
     if not original_order:
         raise ValueError(f"Order ID {order_id} not found.")
@@ -611,20 +446,15 @@ async def modify_order(
     if original_order.status not in [OrderStatus.LIVE, OrderStatus.RECEIVED] or not original_order.editable:
         raise ValueError(f"Order ID {order_id} is not modifiable (Status: {original_order.status.value}).")
 
-    if not original_order.legs:
-        raise ValueError(f"Order ID {order_id} has no legs defined.")
-
-    if len(original_order.legs) > 1:
-        raise ValueError("Multi-leg order modification not supported.")
+    if not original_order.legs or len(original_order.legs) > 1:
+        raise ValueError("Order has no legs or multi-leg modification not supported.")
 
     original_leg = original_order.legs[0]
     updated_quantity = Decimal(str(new_quantity)) if new_quantity is not None else original_leg.quantity
     updated_price = Decimal(str(new_price)) if new_price is not None else original_order.price
 
-    if updated_quantity <= 0:
-        raise ValueError("New quantity must be positive.")
-    if updated_price <= Decimal(0):
-        raise ValueError("New price must be positive.")
+    if updated_quantity <= 0 or updated_price <= Decimal(0):
+        raise ValueError("New quantity and price must be positive.")
 
     instrument = await _create_instrument(context.session, original_leg.symbol)
     if not instrument:
@@ -634,22 +464,14 @@ async def modify_order(
         time_in_force=original_order.time_in_force,
         order_type=original_order.order_type,
         legs=[instrument.build_leg(updated_quantity, original_leg.action)],
-        price=updated_price,
-        price_effect=original_order.price_effect
+        price=updated_price
     )
 
-    response = await context.account.a_replace_order(
-        context.session,
-        int(order_id),
-        modified_order,
-        dry_run=dry_run
-    )
+    response = await context.account.a_replace_order(context.session, int(order_id), modified_order, dry_run=dry_run)
 
     if response.errors:
         error_msg = "\n".join(str(e) for e in response.errors)
         raise ValueError(f"Failed to modify order ID {order_id}:\n{error_msg}")
-
-    # Note: Account data will be fetched fresh when needed via tools
 
     new_order_id = "N/A - Dry Run" if dry_run else (response.order.id if response.order else "Unknown")
     success_msg = f"Order ID {order_id} modified successfully. New Order ID: {new_order_id}."
@@ -660,22 +482,23 @@ async def modify_order(
     return success_msg
 
 @mcp.tool()
-async def check_market_status(ctx: Context) -> str:
-    """Check if the market is currently open or closed.
+async def wait(duration_seconds: int = 60) -> str:
+    """Wait for a specified duration in seconds (1-60)."""
+    duration = max(1, min(duration_seconds, 60))
+    await asyncio.sleep(duration)
+    return f"Waited for {duration} seconds"
 
-    Returns the current market status and, if closed, when the market will next open.
-    """
-    is_open, next_open = _get_market_status()
+@mcp.tool()
+async def check_market_status() -> str:
+    """Check if the market is currently open or closed."""
+    nyse = get_calendar('XNYS')
+    current_time = datetime.now(ZoneInfo('America/New_York'))
 
-    if is_open:
+    if nyse.is_open_on_minute(current_time):
         return "Market is currently OPEN"
-    else:
-        current_time = datetime.now(ZoneInfo('America/New_York'))
-        time_until = next_open - current_time
-        next_open_formatted = next_open.strftime("%A, %B %d, %Y at %I:%M %p %Z")
 
-        return (
-            f"Market is currently CLOSED\n"
-            f"Next market open: {next_open_formatted}\n"
-            f"Time until market opens: {time_until}"
-        )
+    next_open = nyse.next_open(current_time)
+    time_until = next_open - current_time
+    next_open_formatted = next_open.strftime("%A, %B %d, %Y at %I:%M %p %Z")
+
+    return f"Market is currently CLOSED. Next market open: {next_open_formatted} (in {time_until})"
