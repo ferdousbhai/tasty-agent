@@ -1,6 +1,6 @@
 [project]
 name = "tasty-agent"
-version = "0.2.1"
+version = "0.2.2"
 description = "A Model Context Protocol server for interacting with TastyTrade brokerage accounts"
 readme = "README.md"
 requires-python = ">=3.12"
