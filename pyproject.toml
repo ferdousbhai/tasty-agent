@@ -1,15 +1,17 @@
 [project]
 name = "tasty-agent"
-version = "0.2.2"
+dynamic = ["version"]
 description = "A Model Context Protocol server for interacting with TastyTrade brokerage accounts"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "keyring",
-    "mcp[cli]",
-    "tastytrade",
+    "mcp[cli]>=1.9.4",
+    "tastytrade>=10.2.3",
     "exchange-calendars",
     "tabulate",
+    "click",
+    "rich",
 ]
 authors = [{ name = "Ferdous", email = "ferdous@hey.com" }]
 keywords = ["tastytrade", "trading", "mcp", "model context protocol", "broker", "robinhood", "wallstreetbets"]
@@ -22,11 +24,17 @@ classifiers = [
 ]
 
 [project.scripts]
-tasty-agent = "src.tasty_agent.cli:main"
+tasty-agent = "tasty_agent.cli:main"
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
 
+[tool.hatch.version]
+source = "vcs"
+
 [tool.hatch.build.targets.wheel]
-packages = ["src"]
+packages = ["tasty_agent"]
+
+[tool.hatch.build.hooks.vcs]
+version-file = "tasty_agent/_version.py"
