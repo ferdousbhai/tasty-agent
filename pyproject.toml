@@ -38,3 +38,8 @@ packages = ["tasty_agent"]
 
 [tool.hatch.build.hooks.vcs]
 version-file = "tasty_agent/_version.py"
+
+[dependency-groups]
+dev = [
+    "ipykernel>=6.29.5",
+]
