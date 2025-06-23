@@ -8,10 +8,9 @@ dependencies = [
     "keyring",
     "mcp[cli]>=1.9.4",
     "tastytrade>=10.2.3",
-    "exchange-calendars",
-    "tabulate",
     "click",
     "rich",
+    "humanize>=4.12.3",
 ]
 authors = [{ name = "Ferdous", email = "ferdous@hey.com" }]
 keywords = ["tastytrade", "trading", "mcp", "model context protocol", "broker", "robinhood", "wallstreetbets"]
