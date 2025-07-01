@@ -30,7 +30,7 @@ Or use environment variables:
 
 ### Market Data & Research
 - **`get_option_streamer_symbols(underlying_symbol, expiration_date, min_strike_price, max_strike_price, option_type)`** - Get option chain streamer symbols (option_type: 'C' or 'P', expiration_date: YYYY-MM-DD)
-- **`get_quote(streamer_symbols, timeout=10.0)`** - Real-time quotes via DXLink streaming
+- **`get_quote(streamer_symbol, timeout=10.0)`** - Real-time quote for a single symbol via DXLink streaming
 - **`get_market_metrics(symbols)`** - IV rank, percentile, beta, liquidity for multiple symbols
 - **`market_status(exchanges=['Equity'])`** - Market hours and status ('Equity', 'CME', 'CFE', 'Smalls')
 - **`search_symbols(symbol)`** - Search for symbols by name/ticker

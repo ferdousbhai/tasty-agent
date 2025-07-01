@@ -146,30 +146,23 @@ async def get_option_streamer_symbols(
     return streamer_symbols
 
 @mcp.tool()
-async def get_quote(ctx: Context, streamer_symbols: list[str], timeout: float = 10.0) -> list[dict[str, Any]]:
-    """Get live quotes for ticker symbols. For options, use streamer_symbols from get_option_chain."""
+async def get_quote(ctx: Context, streamer_symbol: str, timeout: float = 10.0) -> dict[str, Any]:
+    """Get live quote for a ticker symbol. For options, use streamer_symbol from get_option_chain."""
     context = get_context(ctx)
+
     try:
         async with DXLinkStreamer(context.session) as streamer:
-            await streamer.subscribe(Quote, streamer_symbols)
-            quotes = []
+            await streamer.subscribe(Quote, [streamer_symbol])
 
-            # Collect quotes until we have all symbols or timeout
-            start_time = asyncio.get_event_loop().time()
-            while len(quotes) < len(streamer_symbols):
-                remaining_time = timeout - (asyncio.get_event_loop().time() - start_time)
-                if remaining_time <= 0:
-                    break
+            # Wait for the quote with timeout
+            quote = await asyncio.wait_for(streamer.get_event(Quote), timeout=timeout)
+            return quote.model_dump()
 
-                try:
-                    quote = await asyncio.wait_for(streamer.get_event(Quote), timeout=remaining_time)
-                    quote_data = quote.model_dump()
-                    quotes.append(quote_data)
-                except asyncio.TimeoutError:
-                    break
-            return quotes
     except asyncio.TimeoutError:
-        raise ValueError(f"Timeout getting quotes for {streamer_symbols}")
+        raise ValueError(f"Timeout getting quote for {streamer_symbol} after {timeout}s")
+    except Exception as e:
+        logger.error(f"Error getting quote for {streamer_symbol}: {e}")
+        raise ValueError(f"Error getting quote: {str(e)}")
 
 @mcp.tool()
 async def get_net_liquidating_value_history(
@@ -314,6 +307,7 @@ async def place_order(
     Actions: "Buy to Open"/"Sell to Close"/"Buy to Close"/"Sell to Open", "Buy"/"Sell" (futures only).
     Instrument type: "Equity", "Equity Option", "Cryptocurrency" etc
     Price: negative for debits, positive for credits. Option symbols auto-normalized to OSI format.
+    Strategy: Try mid-price first, check execution with get_live_orders, revise price if unfilled.
     """
     context = get_context(ctx)
 
