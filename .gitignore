@@ -4,3 +4,4 @@
 data
 dist
 *.ipynb
+tasty_agent/_version.py
