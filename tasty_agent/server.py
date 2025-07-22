@@ -70,7 +70,7 @@ async def lifespan(_) -> AsyncIterator[ServerContext]:
 
 mcp = FastMCP("TastyTrade", lifespan=lifespan)
 
-async def find_option_instrument(session: Session, symbol: str, expiration_date: str, option_type: str, strike_price: float) -> Option:
+async def find_option_instrument(session: Session, symbol: str, expiration_date: str, option_type: Literal['C', 'P'], strike_price: float) -> Option:
     """Helper function to find an option instrument using the option chain."""
     from tastytrade.instruments import a_get_option_chain
     from datetime import datetime
@@ -87,7 +87,7 @@ async def find_option_instrument(session: Session, symbol: str, expiration_date:
 
     for option in chain[target_date]:
         if (option.strike_price == strike_price and
-            option.option_type.value == option_type[0].upper()):
+            option.option_type.value == option_type.upper()):
             return option
 
     raise ValueError(f"Option not found: {symbol} {expiration_date} {option_type} {strike_price}")
@@ -108,7 +108,7 @@ async def get_positions(ctx: Context) -> list[dict[str, Any]]:
 async def get_quote(
     ctx: Context,
     symbol: str,
-    option_type: Literal['Call', 'Put'] | None = None,
+    option_type: Literal['C', 'P'] | None = None,
     strike_price: float | None = None,
     expiration_date: str | None = None,
     timeout: float = 10.0
@@ -118,14 +118,14 @@ async def get_quote(
 
     Args:
         symbol: Stock symbol (e.g., 'AAPL', 'TQQQ')
-        option_type: 'Call' or 'Put' (required for options)
+        option_type: 'C' or 'P' (required for options)
         strike_price: Strike price (required for options)
         expiration_date: Expiration date in YYYY-MM-DD format (required for options)
         timeout: Timeout in seconds
 
     Examples:
         Stock: get_quote("AAPL")
-        Option: get_quote("TQQQ", "Call", 100.0, "2026-01-16")
+        Option: get_quote("TQQQ", "C", 100.0, "2026-01-16")
     """
     context = get_context(ctx)
 
@@ -176,6 +176,10 @@ async def get_history(
 
 @mcp.tool()
 async def get_market_metrics(ctx: Context, symbols: list[str]) -> list[dict[str, Any]]:
+    """
+    Get market metrics including volatility (IV/HV), risk (beta, correlation),
+    valuation (P/E, market cap), liquidity, dividends, earnings, and options data.
+    """
     context = get_context(ctx)
     metrics_data = await a_get_market_metrics(context.session, symbols)
     return [m.model_dump() for m in metrics_data]
@@ -223,9 +227,7 @@ async def market_status(ctx: Context, exchanges: list[Literal['Equity', 'CME', '
                 **({"is_holiday": True} if is_holiday else {}),
                 **({"is_half_day": True} if is_half_day else {})
             }
-
         results.append(result)
-
     return results
 
 @mcp.tool()
@@ -247,7 +249,7 @@ async def get_live_orders(ctx: Context) -> list[dict[str, Any]]:
 async def place_order(
     ctx: Context,
     symbol: str,
-    order_type: Literal['Call', 'Put', 'Stock'],
+    order_type: Literal['C', 'P', 'Stock'],
     action: Literal['Buy', 'Sell'],
     quantity: int,
     price: float,
@@ -261,7 +263,7 @@ async def place_order(
 
     Args:
         symbol: Stock symbol (e.g., 'TQQQ', 'AAPL')
-        order_type: 'Call', 'Put', or 'Stock'
+        order_type: 'C', 'P', or 'Stock'
         action: 'Buy' or 'Sell'
         quantity: Number of contracts or shares
         price: Limit price
@@ -271,13 +273,13 @@ async def place_order(
         dry_run: If True, validates order without placing it
 
     Examples:
-        Options: place_order("TQQQ", "Call", "Buy", 17, 8.55, 100.0, "2026-01-16")
+        Options: place_order("TQQQ", "C", "Buy", 17, 8.55, 100.0, "2026-01-16")
         Stock: place_order("AAPL", "Stock", "Buy", 100, 150.00)
     """
     context = get_context(ctx)
 
     # Validation for options
-    if order_type in ['Call', 'Put']:
+    if order_type in ['C', 'P']:
         if strike_price is None:
             raise ValueError(f"strike_price is required for {order_type} orders")
         if expiration_date is None:
@@ -324,18 +326,22 @@ async def delete_order(ctx: Context, order_id: str) -> dict[str, Any]:
     return {"success": True, "order_id": order_id}
 
 @mcp.tool()
-async def get_public_watchlist_names(ctx: Context) -> list[str]:
-    """Use this to get the name of a watchlist to use with get_public_watchlist_entry_symbols()."""
+async def get_public_watchlists(
+    ctx: Context,
+    name: str | None = None
+) -> list[dict[str, Any]] | dict[str, Any]:
+    """
+    Get public watchlists for market insights and tracking.
+    If name is provided, returns specific watchlist; otherwise returns all public watchlists.
+    """
     context = get_context(ctx)
-    watchlists = await PublicWatchlist.a_get(context.session)
-    return [watchlist.name for watchlist in watchlists]
 
-@mcp.tool()
-async def get_public_watchlist_entries(ctx: Context, name: str) -> list[dict]:
-    """Use get_public_watchlist_names() first to see available watchlist names."""
-    context = get_context(ctx)
-    watchlist = await PublicWatchlist.a_get(context.session, name)
-    return watchlist.watchlist_entries
+    if name:
+        watchlist = await PublicWatchlist.a_get(context.session, name)
+        return watchlist.model_dump()
+    else:
+        watchlists = await PublicWatchlist.a_get(context.session)
+        return [watchlist.model_dump() for watchlist in watchlists]
 
 @mcp.tool()
 async def get_private_watchlists(
