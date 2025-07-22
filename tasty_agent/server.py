@@ -22,28 +22,6 @@ from tastytrade.watchlists import PublicWatchlist, PrivateWatchlist, PairsWatchl
 
 logger = logging.getLogger(__name__)
 
-def normalize_occ_symbol(symbol: str) -> str:
-    """Normalize OCC symbols to OSI format: RRRRRRYYMMDDCPPPPPPPPP (21 chars total)"""
-    clean_symbol = symbol.replace(" ", "")
-
-    if len(clean_symbol) < 15:
-        raise ValueError(f"Invalid OCC symbol format: {symbol}")
-
-    # Extract components from end backwards
-    strike = clean_symbol[-8:]
-    call_put = clean_symbol[-9]
-    if call_put not in ['C', 'P']:
-        raise ValueError(f"Invalid call/put indicator in symbol: {symbol}")
-
-    expiration = clean_symbol[-15:-9]
-    if len(expiration) != 6 or not expiration.isdigit():
-        raise ValueError(f"Invalid expiration format in symbol: {symbol}")
-
-    root = clean_symbol[:-15]
-    if len(root) == 0 or len(root) > 6:
-        raise ValueError(f"Invalid root symbol length in symbol: {symbol}")
-
-    return f"{root.ljust(6)}{expiration}{call_put}{strike}"
 
 @dataclass
 class ServerContext:
@@ -92,6 +70,28 @@ async def lifespan(_) -> AsyncIterator[ServerContext]:
 
 mcp = FastMCP("TastyTrade", lifespan=lifespan)
 
+async def find_option_instrument(session: Session, symbol: str, expiration_date: str, option_type: str, strike_price: float) -> Option:
+    """Helper function to find an option instrument using the option chain."""
+    from tastytrade.instruments import a_get_option_chain
+    from datetime import datetime
+
+    # Get option chain for the underlying
+    chain = await a_get_option_chain(session, symbol)
+
+    # Parse target expiration date
+    target_date = datetime.strptime(expiration_date, "%Y-%m-%d").date()
+
+    # Find the specific option
+    if target_date not in chain:
+        raise ValueError(f"No options found for expiration date {expiration_date}")
+
+    for option in chain[target_date]:
+        if (option.strike_price == strike_price and
+            option.option_type.value == option_type[0].upper()):
+            return option
+
+    raise ValueError(f"Option not found: {symbol} {expiration_date} {option_type} {strike_price}")
+
 @mcp.tool()
 async def get_balances(ctx: Context) -> dict[str, Any]:
     context = get_context(ctx)
@@ -105,50 +105,40 @@ async def get_positions(ctx: Context) -> list[dict[str, Any]]:
     return [pos.model_dump() for pos in positions]
 
 @mcp.tool()
-async def get_option_streamer_symbols(
+async def get_quote(
     ctx: Context,
-    underlying_symbol: str,
-    expiration_date: str,
-    min_strike_price: float,
-    max_strike_price: float,
-    option_type: Literal['C', 'P']
-) -> list[str]:
-    """Get filtered option chain data. expiration_date format: YYYY-MM-DD"""
+    symbol: str,
+    option_type: Literal['Call', 'Put'] | None = None,
+    strike_price: float | None = None,
+    expiration_date: str | None = None,
+    timeout: float = 10.0
+) -> dict[str, Any]:
+    """
+    Get live quote for a stock or option.
+
+    Args:
+        symbol: Stock symbol (e.g., 'AAPL', 'TQQQ')
+        option_type: 'Call' or 'Put' (required for options)
+        strike_price: Strike price (required for options)
+        expiration_date: Expiration date in YYYY-MM-DD format (required for options)
+        timeout: Timeout in seconds
+
+    Examples:
+        Stock: get_quote("AAPL")
+        Option: get_quote("TQQQ", "Call", 100.0, "2026-01-16")
+    """
     context = get_context(ctx)
-    chains = await NestedOptionChain.a_get(context.session, underlying_symbol)
-    if not chains:
-        raise ValueError(f"No option chain found for {underlying_symbol}")
 
-    chain = chains[0]
+    # For options, find the option using helper function
+    if option_type is not None:
+        if strike_price is None or expiration_date is None:
+            raise ValueError("strike_price and expiration_date are required for option quotes")
 
-    target_exp = datetime.strptime(expiration_date, "%Y-%m-%d").date()
-
-    min_strike_decimal = Decimal(str(min_strike_price))
-    max_strike_decimal = Decimal(str(max_strike_price))
-
-    if option_type not in ['C', 'P']:
-        raise ValueError("option_type must be 'C' or 'P'")
-
-    streamer_symbols = []
-    for option_expiration in chain.expirations:
-        if option_expiration.expiration_date != target_exp:
-            continue
-
-        for strike in option_expiration.strikes:
-            if strike.strike_price < min_strike_decimal: continue
-            if strike.strike_price > max_strike_decimal: continue
-
-            if option_type == 'C':
-                streamer_symbols.append(strike.call_streamer_symbol)
-            else:  # option_type == 'P'
-                streamer_symbols.append(strike.put_streamer_symbol)
-
-    return streamer_symbols
-
-@mcp.tool()
-async def get_quote(ctx: Context, streamer_symbol: str, timeout: float = 10.0) -> dict[str, Any]:
-    """Get live quote for a ticker symbol. For options, use streamer_symbol from get_option_chain."""
-    context = get_context(ctx)
+        option_instrument = await find_option_instrument(context.session, symbol, expiration_date, option_type, strike_price)
+        streamer_symbol = option_instrument.streamer_symbol
+    else:
+        # For stocks, use the symbol directly
+        streamer_symbol = symbol
 
     try:
         async with DXLinkStreamer(context.session) as streamer:
@@ -251,82 +241,79 @@ async def get_live_orders(ctx: Context) -> list[dict[str, Any]]:
     orders = await context.account.a_get_live_orders(context.session)
     return [order.model_dump() for order in orders]
 
-async def build_order_legs(session: Session, legs_data: list[dict]) -> list[Leg]:
-    """Helper function to build order legs from list of dictionaries."""
-    order_legs = []
-    for leg_data in legs_data:
-        symbol = leg_data["symbol"]
-        quantity = Decimal(str(leg_data["quantity"]))
 
-        # Validate action is a valid OrderAction value
-        action_str = leg_data["action"]
-        if action_str not in [action.value for action in OrderAction]:
-            valid_actions = [action.value for action in OrderAction]
-            raise ValueError(f"Invalid action '{action_str}'. Valid actions: {valid_actions}")
-        action = OrderAction(action_str)
-
-        instrument_type = leg_data["instrument_type"]
-
-        if instrument_type == "Equity":
-            instrument = await Equity.a_get(session, symbol)
-            leg = instrument.build_leg(quantity, action)
-        elif instrument_type == "Equity Option":
-            normalized_symbol = normalize_occ_symbol(symbol)
-            instrument = await Option.a_get(session, normalized_symbol)
-            leg = instrument.build_leg(quantity, action)
-        elif instrument_type == "Future":
-            instrument = await Future.a_get(session, symbol)
-            leg = instrument.build_leg(quantity, action)
-        elif instrument_type == "Future Option":
-            instrument = await FutureOption.a_get(session, symbol)
-            leg = instrument.build_leg(quantity, action)
-        elif instrument_type == "Cryptocurrency":
-            instrument = await Cryptocurrency.a_get(session, symbol)
-            leg = instrument.build_leg(quantity, action)
-        elif instrument_type == "Warrant":
-            instrument = await Warrant.a_get(session, symbol)
-            leg = instrument.build_leg(quantity, action)
-        else:
-            raise ValueError(f"Unsupported instrument type: {instrument_type}")
-
-        order_legs.append(leg)
-
-    return order_legs
 
 @mcp.tool()
 async def place_order(
     ctx: Context,
-    legs: list[dict],
-    order_type: Literal['Limit', 'Market'] = "Limit",
-    time_in_force: Literal['Day', 'GTC', 'IOC'] = "Day",
-    price: float | None = None,
+    symbol: str,
+    order_type: Literal['Call', 'Put', 'Stock'],
+    action: Literal['Buy', 'Sell'],
+    quantity: int,
+    price: float,
+    strike_price: float | None = None,
+    expiration_date: str | None = None,
+    time_in_force: Literal['Day', 'GTC', 'IOC'] = 'Day',
     dry_run: bool = False
 ) -> dict[str, Any]:
     """
-    Place order. legs: List of dicts with symbol, quantity, action, instrument_type.
-    Actions: "Buy to Open"/"Sell to Close"/"Buy to Close"/"Sell to Open", "Buy"/"Sell" (futures only).
-    Instrument type: "Equity", "Equity Option", "Cryptocurrency" etc
-    Price: negative for debits, positive for credits. Option symbols auto-normalized to OSI format.
-    Strategy: Try mid-price first, check execution with get_live_orders, revise price if unfilled.
+    Place an options or equity order with simplified parameters.
+
+    Args:
+        symbol: Stock symbol (e.g., 'TQQQ', 'AAPL')
+        order_type: 'Call', 'Put', or 'Stock'
+        action: 'Buy' or 'Sell'
+        quantity: Number of contracts or shares
+        price: Limit price
+        strike_price: Strike price (required for options)
+        expiration_date: Expiration date in YYYY-MM-DD format (required for options)
+        time_in_force: 'Day', 'GTC', or 'IOC'
+        dry_run: If True, validates order without placing it
+
+    Examples:
+        Options: place_order("TQQQ", "Call", "Buy", 17, 8.55, 100.0, "2026-01-16")
+        Stock: place_order("AAPL", "Stock", "Buy", 100, 150.00)
     """
     context = get_context(ctx)
 
-    # Validate order_type and time_in_force are valid enum values
-    if order_type not in [ot.value for ot in OrderType]:
-        valid_types = [ot.value for ot in OrderType]
-        raise ValueError(f"Invalid order_type '{order_type}'. Valid types: {valid_types}")
+    # Validation for options
+    if order_type in ['Call', 'Put']:
+        if strike_price is None:
+            raise ValueError(f"strike_price is required for {order_type} orders")
+        if expiration_date is None:
+            raise ValueError(f"expiration_date is required for {order_type} orders")
 
-    if time_in_force not in [tif.value for tif in OrderTimeInForce]:
-        valid_tifs = [tif.value for tif in OrderTimeInForce]
-        raise ValueError(f"Invalid time_in_force '{time_in_force}'. Valid values: {valid_tifs}")
+        # Find the option using helper function
+        instrument = await find_option_instrument(context.session, symbol, expiration_date, order_type, strike_price)
 
-    order_legs = await build_order_legs(context.session, legs)
+        # Map simplified action to tastytrade OrderAction
+        if action == 'Buy':
+            order_action = OrderAction.BUY_TO_OPEN
+        else:  # action == 'Sell'
+            order_action = OrderAction.SELL_TO_OPEN
+
+        # Build option leg
+        leg = instrument.build_leg(Decimal(str(quantity)), order_action)
+
+    else:  # order_type == 'Stock'
+        # Map simplified action to tastytrade OrderAction for stocks
+        if action == 'Buy':
+            order_action = OrderAction.BUY
+        else:  # action == 'Sell'
+            order_action = OrderAction.SELL
+
+        # Build equity leg
+        instrument = await Equity.a_get(context.session, symbol)
+        leg = instrument.build_leg(Decimal(str(quantity)), order_action)
+
+    # Create and place the order
     order = NewOrder(
         time_in_force=OrderTimeInForce(time_in_force),
-        order_type=OrderType(order_type),
-        legs=order_legs,
-        price=Decimal(str(price)) if price is not None else None
+        order_type=OrderType.LIMIT,
+        legs=[leg],
+        price=Decimal(str(price))
     )
+
     response = await context.account.a_place_order(context.session, order, dry_run=dry_run)
     return response.model_dump()
 
