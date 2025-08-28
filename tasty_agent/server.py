@@ -6,7 +6,7 @@ from decimal import Decimal
 import keyring
 import logging
 import os
-from typing import Literal, AsyncIterator, Any
+from typing import Literal, AsyncIterator, Any, TypedDict
 
 import humanize
 from mcp.server.fastmcp import FastMCP, Context
@@ -361,11 +361,15 @@ async def get_private_watchlists(
         watchlists = await PrivateWatchlist.a_get(context.session)
         return [w.model_dump() for w in watchlists]
 
+class WatchlistEntryDict(TypedDict):
+    symbol: str
+    instrument_type: str
+
 @mcp.tool()
 async def create_private_watchlist(
     ctx: Context,
     name: str,
-    entries: list[dict] = [],
+    entries: list[WatchlistEntryDict] = [],
     group_name: str = "main"
 ) -> None:
     """
