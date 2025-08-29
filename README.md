@@ -42,9 +42,8 @@ Or use environment variables:
 ### Watchlist Management
 - **`get_public_watchlists(name=None)`** - Get public watchlists (all watchlists if name=None, specific watchlist if name provided)
 - **`get_private_watchlists(name=None)`** - Get private watchlists (all watchlists if name=None, specific watchlist if name provided)
-- **`create_private_watchlist(name, entries=[], group_name='main')`** - Create new private watchlist
-- **`add_symbol_to_private_watchlist(watchlist_name, symbol, instrument_type)`** - Add symbol to existing watchlist
-- **`remove_symbol_from_private_watchlist(watchlist_name, symbol, instrument_type)`** - Remove symbol from watchlist
+- **`add_symbol_to_private_watchlist(symbol, instrument_type, name='main')`** - Add symbol to private watchlist (creates if doesn't exist)
+- **`remove_symbol_from_private_watchlist(symbol, instrument_type, watchlist_name='main')`** - Remove symbol from watchlist
 - **`delete_private_watchlist(name)`** - Delete private watchlist
 
 ## Watchlist Entry Format
