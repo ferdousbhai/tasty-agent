@@ -1,5 +1,6 @@
 **/__pycache__/
 .claude
+.env
 .venv
 data
 dist

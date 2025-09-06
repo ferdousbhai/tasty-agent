@@ -5,11 +5,8 @@ description = "A Model Context Protocol server for interacting with TastyTrade b
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "keyring",
     "mcp[cli]>=1.9.4",
-    "tastytrade>=10.2.3",
-    "click",
-    "rich",
+    "tastytrade>=10.3.0",
     "humanize>=4.12.3",
 ]
 authors = [{ name = "Ferdous", email = "ferdous@hey.com" }]
@@ -23,7 +20,7 @@ classifiers = [
 ]
 
 [project.scripts]
-tasty-agent = "tasty_agent.cli:main"
+tasty-agent = "tasty_agent.server:mcp_app.run"
 
 [build-system]
 requires = ["hatchling", "hatch-vcs"]
@@ -41,4 +38,6 @@ version-file = "tasty_agent/_version.py"
 [dependency-groups]
 dev = [
     "ipykernel>=6.29.5",
+    "pydantic-ai>=0.4.6",
+    "python-dotenv>=1.1.0",
 ]

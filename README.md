@@ -10,15 +10,12 @@ uvx tasty-agent
 
 ### Authentication
 
-Set up credentials (stored in system keyring):
-```bash
-uvx tasty-agent setup
-```
-
-Or use environment variables:
-- `TASTYTRADE_USERNAME`
-- `TASTYTRADE_PASSWORD`
-- `TASTYTRADE_ACCOUNT_ID` (optional)
+**OAuth Setup**:
+1. Create an OAuth app at https://my.tastytrade.com/app.html#/manage/api-access/oauth-applications
+2. Check all scopes, save your client ID and client secret  
+3. Create a "New Personal OAuth Grant" in your OAuth app settings (check all scopes)
+4. Copy the generated refresh token
+5. Configure the MCP server with your credentials (see Usage section below)
 
 ## MCP Tools
 
@@ -40,10 +37,8 @@ Or use environment variables:
 - **`delete_order(order_id)`** - Cancel orders by ID
 
 ### Watchlist Management
-- **`get_public_watchlists(name=None)`** - Get public watchlists (all watchlists if name=None, specific watchlist if name provided)
-- **`get_private_watchlists(name=None)`** - Get private watchlists (all watchlists if name=None, specific watchlist if name provided)
-- **`add_symbol_to_private_watchlist(symbol, instrument_type, name='main')`** - Add symbol to private watchlist (creates if doesn't exist)
-- **`remove_symbol_from_private_watchlist(symbol, instrument_type, watchlist_name='main')`** - Remove symbol from watchlist
+- **`get_watchlists(watchlist_type='private', name=None)`** - Get watchlists ('public'/'private', all if name=None)
+- **`manage_private_watchlist(action, symbol, instrument_type, name='main')`** - Add/remove symbols from private watchlists
 - **`delete_private_watchlist(name)`** - Delete private watchlist
 
 ## Watchlist Entry Format
@@ -64,6 +59,7 @@ Watchlist entries use this format:
 
 ## Key Features
 
+- **OAuth authentication** for secure API access without exposing login credentials
 - **Real-time streaming** quotes via DXLink WebSocket
 - **Watchlist management** for portfolio organization
 - **Dry-run testing** for all order operations
@@ -78,7 +74,12 @@ Add to `claude_desktop_config.json`:
   "mcpServers": {
     "tastytrade": {
       "command": "uvx",
-      "args": ["tasty-agent"]
+      "args": ["tasty-agent"],
+      "env": {
+        "TASTYTRADE_CLIENT_SECRET": "your_client_secret",
+        "TASTYTRADE_REFRESH_TOKEN": "your_refresh_token",
+        "TASTYTRADE_ACCOUNT_ID": "your_account_id"
+      }
     }
   }
 }
@@ -93,13 +94,37 @@ Add to `claude_desktop_config.json`:
 "Place dry-run order: buy 100 AAPL shares at $150"
 "Place order: buy 17 TQQQ C contracts at $8.55, strike 100, expiring 2026-01-16"
 "Cancel order 12345"
-"Create a watchlist called 'Tech Stocks' with AAPL and MSFT"
-"Add TSLA to my Tech Stocks watchlist"
+"Get my private watchlists"
+"Add TSLA to my main watchlist"
+"Remove AAPL from my tech watchlist"
 ```
 
 ## Development
 
-Debug with MCP inspector:
+### Testing with client.py
+
+For interactive testing during development:
+```bash
+# Install dev dependencies
+uv sync --group dev
+
+# Set up environment variables in .env file:
+# TASTYTRADE_CLIENT_SECRET=your_secret
+# TASTYTRADE_REFRESH_TOKEN=your_token  
+# TASTYTRADE_ACCOUNT_ID=your_account_id (optional)
+# OPENAI_API_KEY=your_openai_key
+
+# Run the interactive client
+uv run client.py
+```
+
+The client provides a chat interface to test MCP tools directly. Example commands:
+- "Get my account balances"
+- "Get quote for SPY" 
+- "Place dry-run order: buy 100 AAPL at $150"
+
+### Debug with MCP inspector
+
 ```bash
 npx @modelcontextprotocol/inspector uvx tasty-agent
 ```
