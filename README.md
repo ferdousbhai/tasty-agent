@@ -2,9 +2,7 @@
 
 A Model Context Protocol server for TastyTrade brokerage accounts. Enables LLMs to monitor portfolios, analyze positions, and execute trades.
 
-## Configuration
-
-### Authentication
+## Authentication
 
 **OAuth Setup**:
 1. Create an OAuth app at https://my.tastytrade.com/app.html#/manage/api-access/oauth-applications
@@ -27,6 +25,7 @@ A Model Context Protocol server for TastyTrade brokerage accounts. Enables LLMs 
 - **`get_market_metrics(symbols)`** - IV rank, percentile, beta, liquidity for multiple symbols
 - **`market_status(exchanges=['Equity'])`** - Market hours and status ('Equity', 'CME', 'CFE', 'Smalls')
 - **`search_symbols(symbol)`** - Search for symbols by name/ticker
+- **`get_current_time_nyc()`** - Current time in New York timezone (market time)
 
 ### Order Management
 - **`get_live_orders()`** - Currently active orders

@@ -16,6 +16,7 @@ from tastytrade.metrics import a_get_market_metrics
 from tastytrade.order import NewOrder, OrderAction, OrderTimeInForce, OrderType
 from tastytrade.search import a_symbol_search
 from tastytrade.streamer import DXLinkStreamer
+from tastytrade.utils import now_in_new_york
 from tastytrade.watchlists import PublicWatchlist, PrivateWatchlist
 
 # Simple cache for option chains
@@ -387,3 +388,8 @@ async def delete_private_watchlist(ctx: Context, name: str) -> None:
     context = get_context(ctx)
     await PrivateWatchlist.a_remove(context.session, name)
     ctx.info(f"✅ Deleted private watchlist '{name}'")
+
+
+@mcp_app.tool()
+async def get_current_time_nyc() -> str:
+    return now_in_new_york().isoformat()
