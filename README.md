@@ -1,6 +1,6 @@
 # tasty-agent: A TastyTrade MCP Server
 
-A Model Context Protocol server for TastyTrade brokerage accounts. Enables LLMs to monitor portfolios, analyze positions, and execute trades.
+A Model Context Protocol server for TastyTrade brokerage accounts. Enables LLMs to monitor portfolios, analyze positions, and execute trades. Includes rate limiting (5 req/sec) to prevent API errors.
 
 ## Authentication
 
@@ -29,7 +29,9 @@ A Model Context Protocol server for TastyTrade brokerage accounts. Enables LLMs 
 
 ### Order Management
 - **`get_live_orders()`** - Currently active orders
-- **`place_order(symbol, order_type, action, quantity, price, strike_price=None, expiration_date=None, time_in_force='Day', dry_run=False)`** - Simplified order placement for stocks and options
+- **`place_order(symbol, order_type, action, quantity, price=None, strike_price=None, expiration_date=None, time_in_force='Day', dry_run=False, override_price_protection=False)`** - Smart order placement with automatic price discovery and protection
+  - Auto-pricing: Uses mid-price between bid/ask (rounded to nearest 5¢) when price=None
+  - Price protection: Prevents buying above ask or selling below bid (unless overridden)
 - **`delete_order(order_id)`** - Cancel orders by ID
 
 ### Watchlist Management
@@ -63,12 +65,37 @@ Add to your MCP client configuration (e.g., `claude_desktop_config.json`):
 "Get real-time quote for SPY"
 "Get quote for TQQQ C option with strike 100 expiring 2026-01-16"
 "Get Greeks (delta, gamma, theta, vega, rho) for AAPL P option with strike 150 expiring 2024-12-20"
-"Place dry-run order: buy 100 AAPL shares at $150"
-"Place order: buy 17 TQQQ C contracts at $8.55, strike 100, expiring 2026-01-16"
+"Buy 100 AAPL shares" (auto-pricing)
+"Buy 100 AAPL at $150" (with protection)
+"Buy 17 TQQQ calls, strike 100, exp 2026-01-16"
 "Cancel order 12345"
 "Get my private watchlists"
 "Add TSLA to my main watchlist"
 "Remove AAPL from my tech watchlist"
+```
+
+## Background Trading Bot
+
+Run automated trading strategies with `background.py`:
+
+```bash
+# Run once with instructions
+uv run background.py "Check my portfolio and rebalance if needed"
+
+# Run every hour
+uv run background.py "Monitor SPY and alert on significant moves" --hourly
+
+# Run every day
+uv run background.py "Generate daily portfolio summary" --daily
+
+# Custom period (seconds)
+uv run background.py "Scan for covered call opportunities" --period 1800  # every 30 minutes
+
+# Schedule start time (NYC timezone)
+uv run background.py "Execute morning trading strategy" --schedule "9:30am" --hourly
+
+# Market open shorthand (9:30am)
+uv run background.py "Buy the dip strategy" --market-open --hourly
 ```
 
 ## Development

@@ -6,6 +6,7 @@ from decimal import Decimal
 import os
 from typing import Literal, AsyncIterator, Any
 
+from aiolimiter import AsyncLimiter
 import humanize
 from mcp.server.fastmcp import FastMCP, Context
 from tastytrade import OAuthSession, Account
@@ -21,6 +22,9 @@ from tastytrade.watchlists import PublicWatchlist, PrivateWatchlist
 
 # Simple cache for option chains
 _option_chains = {}
+
+# Rate limiter: 5 requests per second
+rate_limiter = AsyncLimiter(5, 1)
 
 @dataclass
 class ServerContext:
@@ -209,7 +213,7 @@ async def get_market_metrics(ctx: Context, symbols: list[str]) -> list[dict[str,
 
 
 @mcp_app.tool()
-async def market_status(ctx: Context, exchanges: list[Literal['Equity', 'CME', 'CFE', 'Smalls']] = ['Equity']) -> list[dict[str, Any]]:
+async def market_status(ctx: Context, exchanges: list[Literal['NYSE', 'CME', 'CFE', 'Smalls']] = ['NYSE']) -> list[dict[str, Any]]:
     """
     Get market status for each exchange including current open/closed state,
     next opening times, and holiday information.
@@ -273,53 +277,96 @@ async def place_order(
     order_type: Literal['C', 'P', 'Stock'],
     action: Literal['Buy', 'Sell'],
     quantity: int,
-    price: float,
+    price: float | None = None,
     strike_price: float | None = None,
     expiration_date: str | None = None,
     time_in_force: Literal['Day', 'GTC', 'IOC'] = 'Day',
-    dry_run: bool = False
+    dry_run: bool = False,
+    override_price_protection: bool = False
 ) -> dict[str, Any]:
     """
-    Place an options or equity order with simplified parameters.
+    Place an options or equity order.
     
-    Always use get_quote first to fetch current bid/ask prices for calculating mid-price.
-    After placing, check order status and modify price if needed until filled.
+    Automatically calculates optimal pricing and validates against market conditions:
+    - If price not provided (default): uses mid-price between bid/ask, rounded to nearest 5 cents
+    - Price protection: buy orders capped at ask, sell orders floored at bid (unless overridden)
+    After placing order, check order status and modify price if needed until filled.
 
     Args:
         symbol: Stock symbol (e.g., 'TQQQ', 'AAPL')
         order_type: 'C', 'P', or 'Stock'
         action: 'Buy' or 'Sell'
         quantity: Number of contracts or shares. 1 option contract = 100 shares of the underlying stock.
-        price: Limit price. Default to mid-price between bid/ask, fetched using get_quote tool.
+        price: Limit price. If None, uses mid-price between bid/ask rounded to nearest 5 cents.
         strike_price: Strike price (required for options)
         expiration_date: Expiration date in YYYY-MM-DD format (required for options)
         time_in_force: 'Day', 'GTC', or 'IOC'
         dry_run: If True, validates order without placing it
+        override_price_protection: If True, bypasses bid/ask price validation
 
     Examples:
-        Options: place_order("TQQQ", "C", "Buy", 17, 8.55, 100.0, "2026-01-16")
-        Stock: place_order("AAPL", "Stock", "Buy", 100, 150.00)
+        Auto-price: place_order("AAPL", "Stock", "Buy", 100)
+        Set price: place_order("AAPL", "Stock", "Buy", 100, 150.00)
+        Options: place_order("TQQQ", "C", "Buy", 17, strike_price=100.0, expiration_date="2026-01-16")
+        Override: place_order("NVDA", "Stock", "Buy", 100, 155.00, override_price_protection=True)
     """
-    context = get_context(ctx)
+    async with rate_limiter:
+        context = get_context(ctx)
 
-    if order_type in ['C', 'P']:
-        if not strike_price or not expiration_date:
-            raise ValueError(f"strike_price and expiration_date are required for {order_type} orders")
-        
-        instrument = await find_option_instrument(context.session, symbol, expiration_date, order_type, strike_price)
-        order_action = OrderAction.BUY_TO_OPEN if action == 'Buy' else OrderAction.SELL_TO_CLOSE
-    else:
-        instrument = await Equity.a_get(context.session, symbol)
-        order_action = OrderAction.BUY if action == 'Buy' else OrderAction.SELL
+        # Determine streamer symbol for quote fetching
+        if order_type in ['C', 'P']:
+            if not strike_price or not expiration_date:
+                raise ValueError(f"strike_price and expiration_date are required for {order_type} orders")
+            
+            option_instrument = await find_option_instrument(context.session, symbol, expiration_date, order_type, strike_price)
+            streamer_symbol = option_instrument.streamer_symbol
+            instrument = option_instrument
+            order_action = OrderAction.BUY_TO_OPEN if action == 'Buy' else OrderAction.SELL_TO_CLOSE
+        else:
+            streamer_symbol = symbol
+            instrument = await Equity.a_get(context.session, symbol)
+            order_action = OrderAction.BUY if action == 'Buy' else OrderAction.SELL
 
-    order = NewOrder(
-        time_in_force=OrderTimeInForce(time_in_force),
-        order_type=OrderType.LIMIT,
-        legs=[instrument.build_leg(Decimal(str(quantity)), order_action)],
-        price=Decimal(str(-abs(price) if action == 'Buy' else abs(price)))
-    )
+        # Fetch current quote for price calculation and/or validation
+        try:
+            async with DXLinkStreamer(context.session) as streamer:
+                await streamer.subscribe(Quote, [streamer_symbol])
+                quote = await asyncio.wait_for(streamer.get_event(Quote), timeout=10.0)
+                
+                # Calculate price if not provided
+                if price is None:
+                    if quote.bid_price and quote.ask_price:
+                        mid_price = (quote.bid_price + quote.ask_price) / 2
+                        # Round to nearest 5 cents
+                        price = round(mid_price * 20) / 20
+                        await ctx.info(f"💰 Using mid-price: ${price:.2f} (bid: ${quote.bid_price}, ask: ${quote.ask_price})")
+                    else:
+                        raise ValueError(f"Could not calculate mid-price: missing bid ({quote.bid_price}) or ask ({quote.ask_price}) price")
+                
+                # Apply price protection unless overridden
+                if not override_price_protection:
+                    if action == 'Buy' and quote.ask_price and price > quote.ask_price:
+                        await ctx.info(f"⚠️  Reducing buy price from ${price:.2f} to ask price ${quote.ask_price:.2f} to prevent overpaying")
+                        price = float(quote.ask_price)
+                    elif action == 'Sell' and quote.bid_price and price < quote.bid_price:
+                        await ctx.info(f"⚠️  Increasing sell price from ${price:.2f} to bid price ${quote.bid_price:.2f} to prevent underselling")
+                        price = float(quote.bid_price)
+                elif price is not None:
+                    await ctx.info(f"⚠️  Price protection overridden. Using price ${price:.2f} without validation.")
+                        
+        except Exception as e:
+            if price is None:
+                raise ValueError(f"Could not fetch quote for price calculation: {str(e)}. Please provide a price.")
+            await ctx.info(f"⚠️  Could not fetch quote for price validation: {str(e)}. Proceeding with provided price ${price:.2f}.")
 
-    return (await context.account.a_place_order(context.session, order, dry_run=dry_run)).model_dump()
+        order = NewOrder(
+            time_in_force=OrderTimeInForce(time_in_force),
+            order_type=OrderType.LIMIT,
+            legs=[instrument.build_leg(Decimal(str(quantity)), order_action)],
+            price=Decimal(str(-abs(price) if action == 'Buy' else abs(price)))
+        )
+
+        return (await context.account.a_place_order(context.session, order, dry_run=dry_run)).model_dump()
 
 
 @mcp_app.tool()
@@ -367,7 +414,7 @@ async def manage_private_watchlist(
             watchlist = await PrivateWatchlist.a_get(context.session, name)
             watchlist.add_symbol(symbol, instrument_type)
             await watchlist.a_update(context.session)
-            ctx.info(f"✅ Added {symbol} to watchlist '{name}'")
+            await ctx.info(f"✅ Added {symbol} to watchlist '{name}'")
         except Exception:
             watchlist = PrivateWatchlist(
                 name=name,
@@ -375,19 +422,19 @@ async def manage_private_watchlist(
                 watchlist_entries=[{"symbol": symbol, "instrument_type": instrument_type}]
             )
             await watchlist.a_upload(context.session)
-            ctx.info(f"✅ Created watchlist '{name}' and added {symbol}")
+            await ctx.info(f"✅ Created watchlist '{name}' and added {symbol}")
     else:
         watchlist = await PrivateWatchlist.a_get(context.session, name)
         watchlist.remove_symbol(symbol, instrument_type)
         await watchlist.a_update(context.session)
-        ctx.info(f"✅ Removed {symbol} from watchlist '{name}'")
+        await ctx.info(f"✅ Removed {symbol} from watchlist '{name}'")
 
 
 @mcp_app.tool()
 async def delete_private_watchlist(ctx: Context, name: str) -> None:
     context = get_context(ctx)
     await PrivateWatchlist.a_remove(context.session, name)
-    ctx.info(f"✅ Deleted private watchlist '{name}'")
+    await ctx.info(f"✅ Deleted private watchlist '{name}'")
 
 
 @mcp_app.tool()
