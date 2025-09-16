@@ -1,6 +1,6 @@
 # tasty-agent: A TastyTrade MCP Server
 
-A Model Context Protocol server for TastyTrade brokerage accounts. Enables LLMs to monitor portfolios, analyze positions, and execute trades. Includes rate limiting (5 req/sec) to prevent API errors.
+A Model Context Protocol server for TastyTrade brokerage accounts. Enables LLMs to monitor portfolios, analyze positions, and execute trades. Features AI-powered trade idea generation, automated IV analysis prompts, and built-in rate limiting (2 requests/second) to prevent API errors.
 
 ## Authentication
 
@@ -17,11 +17,12 @@ A Model Context Protocol server for TastyTrade brokerage accounts. Enables LLMs 
 - **`get_balances()`** - Account balances and buying power
 - **`get_positions()`** - All open positions with current values
 - **`get_net_liquidating_value_history(time_back='1y')`** - Portfolio value history ('1d', '1m', '3m', '6m', '1y', 'all')
-- **`get_history(start_date=None)`** - Transaction history (format: YYYY-MM-DD, default: last 90 days)
+- **`get_trade_history(start_date=None, end_date=None, underlying_symbol=None, per_page=250, page_offset=None)`** - Trading transaction history (format: YYYY-MM-DD, default: last 90 days)
+- **`get_order_history(start_date=None, end_date=None, underlying_symbol=None, per_page=250, page_offset=None)`** - Order history including filled, canceled, and rejected orders (format: YYYY-MM-DD, default: last 90 days)
 
 ### Market Data & Research
-- **`get_quote(symbol, option_type=None, strike_price=None, expiration_date=None, timeout=10.0)`** - Real-time quotes for stocks and options via DXLink streaming
-- **`get_greeks(symbol, option_type, strike_price, expiration_date, timeout=10.0)`** - Greeks (delta, gamma, theta, vega, rho) for options via DXLink streaming
+- **`get_quotes(instruments, timeout=10.0)`** - Real-time quotes for multiple stocks and/or options via DXLink streaming
+- **`get_greeks(options, timeout=10.0)`** - Greeks (delta, gamma, theta, vega, rho) for multiple options via DXLink streaming
 - **`get_market_metrics(symbols)`** - IV rank, percentile, beta, liquidity for multiple symbols
 - **`market_status(exchanges=['Equity'])`** - Market hours and status ('Equity', 'CME', 'CFE', 'Smalls')
 - **`search_symbols(symbol)`** - Search for symbols by name/ticker
@@ -29,15 +30,39 @@ A Model Context Protocol server for TastyTrade brokerage accounts. Enables LLMs 
 
 ### Order Management
 - **`get_live_orders()`** - Currently active orders
-- **`place_order(symbol, order_type, action, quantity, price=None, strike_price=None, expiration_date=None, time_in_force='Day', dry_run=False, override_price_protection=False)`** - Smart order placement with automatic price discovery and protection
-  - Auto-pricing: Uses mid-price between bid/ask (rounded to nearest 5¢) when price=None
-  - Price protection: Prevents buying above ask or selling below bid (unless overridden)
+- **`place_order(legs, price=None, time_in_force='Day', dry_run=False)`** - Place multi-leg orders with automatic price discovery from market quotes
+  - **Stock actions**: 'Buy', 'Sell'
+  - **Option actions**: 'Buy to Open', 'Buy to Close', 'Sell to Open', 'Sell to Close'
+- **`replace_order(order_id, price)`** - Modify existing order price (for complex changes, cancel and place new order)
 - **`delete_order(order_id)`** - Cancel orders by ID
 
 ### Watchlist Management
 - **`get_watchlists(watchlist_type='private', name=None)`** - Get watchlists ('public'/'private', all if name=None)
-- **`manage_private_watchlist(action, symbol, instrument_type, name='main')`** - Add/remove symbols from private watchlists
+- **`manage_private_watchlist(action, symbols, name='main')`** - Add/remove multiple symbols from private watchlists
 - **`delete_private_watchlist(name)`** - Delete private watchlist
+
+### AI-Powered Analysis
+- **`generate_trade_ideas(focus_symbols=None, risk_tolerance='moderate', max_ideas=5)`** - Generate specific, actionable trade ideas using AI analysis of current positions, watchlists, market metrics, and volatility environment
+
+### MCP Prompts
+- **IV Rank Analysis** - Automated prompt to analyze IV rank extremes across positions and watchlists for entry/exit opportunities
+
+## Key Features
+
+### Smart Order Placement
+- Automatic price calculation from real-time market quotes when no price specified
+- Multi-leg options strategies (spreads, strangles, etc.) with single function call
+- Dry-run mode for testing orders without execution
+
+### AI-Powered Trading Assistant
+- **Trade Idea Generation**: Uses AI to analyze current positions, watchlists, market metrics, and volatility to generate specific actionable trade ideas
+- **IV Analysis Prompts**: Pre-built prompts to identify extreme IV rank conditions for entry/exit opportunities
+- Risk-adjusted suggestions based on conservative/moderate/aggressive tolerance levels
+
+### Rate Limiting & Reliability
+- Built-in rate limiting (2 requests/second) prevents API throttling
+- Option chain caching reduces redundant API calls
+- Comprehensive error handling and logging
 
 ### MCP Client Configuration
 
@@ -62,21 +87,27 @@ Add to your MCP client configuration (e.g., `claude_desktop_config.json`):
 
 ```
 "Get my account balances and current positions"
-"Get real-time quote for SPY"
-"Get quote for TQQQ C option with strike 100 expiring 2026-01-16"
-"Get Greeks (delta, gamma, theta, vega, rho) for AAPL P option with strike 150 expiring 2024-12-20"
+"Get real-time quotes for SPY and AAPL"
+"Get quotes for TQQQ C option with strike 100 expiring 2026-01-16"
+"Get Greeks for AAPL P option with strike 150 expiring 2024-12-20"
 "Buy 100 AAPL shares" (auto-pricing)
-"Buy 100 AAPL at $150" (with protection)
-"Buy 17 TQQQ calls, strike 100, exp 2026-01-16"
+"Buy 100 AAPL at $150"
+"Buy to open 17 TQQQ calls, strike 100, exp 2026-01-16"
+"Place a call spread: buy to open AAPL 150C and sell to open AAPL 155C, both exp 2024-12-20"
+"Close my AAPL position: sell to close 10 AAPL calls"
+"Modify order 12345 to price $10.05"
 "Cancel order 12345"
+"Get my trading history from January"
 "Get my private watchlists"
-"Add TSLA to my main watchlist"
+"Add TSLA and NVDA to my tech watchlist"
 "Remove AAPL from my tech watchlist"
+"Generate trade ideas for my portfolio"
+"Generate aggressive trade ideas for AAPL and TSLA"
 ```
 
 ## Background Trading Bot
 
-Run automated trading strategies with `background.py`:
+Run automated trading strategies:
 
 ```bash
 # Run once with instructions
@@ -100,21 +131,20 @@ uv run background.py "Buy the dip strategy" --market-open --hourly
 
 ## Development
 
-### Testing with client.py
+### Testing with chat.py
 
 For interactive testing during development:
 ```bash
-# Install dev dependencies
-uv sync --group dev
-
 # Set up environment variables in .env file:
 # TASTYTRADE_CLIENT_SECRET=your_secret
-# TASTYTRADE_REFRESH_TOKEN=your_token  
-# TASTYTRADE_ACCOUNT_ID=your_account_id (optional)
-# OPENAI_API_KEY=your_openai_key
+# TASTYTRADE_REFRESH_TOKEN=your_token
+# TASTYTRADE_ACCOUNT_ID=your_account_id (optional, defaults to the first account)
+# OPENAI_API_KEY=your_openai_key (you can provide alternative provider of your choice as supported by pydantic-ai)
+# MODEL_IDENTIFIER=model_provider:model_name (optional - defaults to openai:gpt-4.1)
+
 
 # Run the interactive client
-uv run client.py
+uv run chat.py
 ```
 
 The client provides a chat interface to test MCP tools directly. Example commands:
