@@ -6,8 +6,6 @@ from agent import create_tastytrader_agent
 logger = logging.getLogger(__name__)
 
 async def main():
-    print("Tasty Agent Chat (type 'quit' to exit)")
-
     try:
         agent = create_tastytrader_agent()
         logger.info("Chat session started")
@@ -16,7 +14,8 @@ async def main():
         print(f"❌ Failed to start chat: {e}")
         return
 
-    async with agent:  # This maintains MCP server subprocess for entire session
+    async with agent:
+        print("Tasty Agent Chat (type 'quit' to exit)")
         result = None
         while True:
             try:
@@ -35,7 +34,6 @@ async def main():
                 logger.info("Chat session interrupted by user")
                 break
             except Exception as e:
-                logger.error(f"Error processing user input '{user_input}': {e}")
                 print(f"❌ {e}")
                 continue
 

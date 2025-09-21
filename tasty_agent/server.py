@@ -5,14 +5,18 @@ from datetime import timedelta, datetime, date, timezone
 from decimal import Decimal
 import logging
 import os
-from typing import Literal, AsyncIterator, Any
+from typing import Literal, AsyncIterator, Any, Sequence, TypedDict
+from pydantic import BaseModel
 
+from aiocache import cached, Cache
+from aiocache.serializers import PickleSerializer
 from aiolimiter import AsyncLimiter
 import humanize
 from mcp.server.fastmcp import FastMCP, Context
 from mcp.server.fastmcp.prompts import base
 from mcp.server.session import ServerSession
 from mcp.types import SamplingMessage, TextContent
+from tabulate import tabulate
 from tastytrade import OAuthSession, Account
 from tastytrade.dxfeed import Quote, Greeks
 from tastytrade.instruments import Equity, Option, a_get_option_chain
@@ -24,14 +28,15 @@ from tastytrade.streamer import DXLinkStreamer
 from tastytrade.utils import now_in_new_york
 from tastytrade.watchlists import PublicWatchlist, PrivateWatchlist
 
-# Set up logging
 logger = logging.getLogger(__name__)
 
-# Simple cache for option chains
-_option_chains = {}
+rate_limiter = AsyncLimiter(2, 1) # 2 requests per second
 
-# Rate limiter: 2 requests per second
-rate_limiter = AsyncLimiter(2, 1)
+def to_table(data: Sequence[BaseModel]) -> str:
+    """Format list of Pydantic models as a plain table."""
+    if not data:
+        return "No data"
+    return tabulate([item.model_dump() for item in data], headers='keys', tablefmt='plain')
 
 @dataclass
 class ServerContext:
@@ -83,6 +88,10 @@ async def lifespan(_) -> AsyncIterator[ServerContext]:
 
 mcp_app = FastMCP("TastyTrade", lifespan=lifespan)
 
+# =============================================================================
+# ACCOUNT & POSITION TOOLS
+# =============================================================================
+
 @mcp_app.tool()
 async def get_balances(ctx: Context) -> dict[str, Any]:
     context = get_context(ctx)
@@ -90,119 +99,101 @@ async def get_balances(ctx: Context) -> dict[str, Any]:
 
 
 @mcp_app.tool()
-async def get_positions(ctx: Context) -> list[dict[str, Any]]:
+async def get_positions(ctx: Context) -> str:
     context = get_context(ctx)
-    return [pos.model_dump() for pos in await context.account.a_get_positions(context.session, include_marks=True)]
+    positions = await context.account.a_get_positions(context.session, include_marks=True)
+    return to_table(positions)
 
 
-async def find_option_instrument(session: OAuthSession, symbol: str, expiration_date: str, option_type: Literal['C', 'P'], strike_price: float) -> Option:
-    """Helper function to find an option instrument using the option chain."""
-
-    # Cache option chains to reduce API calls
-    if symbol not in _option_chains:
-        _option_chains[symbol] = await a_get_option_chain(session, symbol)
-    chain = _option_chains[symbol]
-    target_date = datetime.strptime(expiration_date, "%Y-%m-%d").date()
-
-    if target_date not in chain:
-        available_dates = sorted(chain.keys())
-        logger.warning(f"No options found for {symbol} expiration date {expiration_date}. Available dates: {available_dates}")
-        raise ValueError(f"No options found for expiration date {expiration_date}")
-
-    for option in chain[target_date]:
-        if (option.strike_price == strike_price and
-            option.option_type.value == option_type.upper()):
-            return option
-
-    available_strikes = [opt.strike_price for opt in chain[target_date] if opt.option_type.value == option_type.upper()]
-    logger.warning(f"Option not found for {symbol} {expiration_date} {option_type} {strike_price}. Available strikes for {option_type}: {sorted(set(available_strikes))}")
-    raise ValueError(f"Option not found: {symbol} {expiration_date} {option_type} {strike_price}")
+@mcp_app.tool()
+async def get_net_liquidating_value_history(
+    ctx: Context,
+    time_back: Literal['1d', '1m', '3m', '6m', '1y', 'all'] = '1y'
+) -> str:
+    """Portfolio value over time. ⚠️ Use with get_transaction_history(transaction_type="Money Movement") to separate trading performance from deposits/withdrawals."""
+    context = get_context(ctx)
+    history = await context.account.a_get_net_liquidating_value_history(context.session, time_back=time_back)
+    return to_table(history)
 
 
-async def get_instrument_details(session: OAuthSession, instrument_specs: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Common helper to lookup instrument details in parallel."""
-    async def lookup_single_instrument(spec):
-        symbol = spec['symbol']
+
+# =============================================================================
+# MARKET DATA TOOLS
+# =============================================================================
+
+class InstrumentDetail(TypedDict):
+    streamer_symbol: str
+    instrument: Equity | Option
+
+
+def validate_date_format(date_string: str) -> date:
+    """Validate date format and return date object."""
+    try:
+        return datetime.strptime(date_string, "%Y-%m-%d").date()
+    except ValueError:
+        raise ValueError(f"Invalid date format '{date_string}'. Expected YYYY-MM-DD format.")
+
+
+def validate_strike_price(strike_price: Any) -> float:
+    """Validate and convert strike price to float."""
+    try:
+        strike = float(strike_price)
+        if strike <= 0:
+            raise ValueError("Strike price must be positive")
+        return strike
+    except (ValueError, TypeError):
+        raise ValueError(f"Invalid strike price '{strike_price}'. Expected positive number.")
+
+
+@cached(ttl=86400, cache=Cache.MEMORY, serializer=PickleSerializer())  # 24 hours
+async def get_cached_option_chain(session: OAuthSession, symbol: str):
+    """Cache option chains for 24 hours as they rarely change during that timeframe."""
+    return await a_get_option_chain(session, symbol)
+
+
+async def get_instrument_details(session: OAuthSession, instrument_specs: list[dict[str, Any]]) -> list[InstrumentDetail]:
+    """Get instrument details with validation and caching."""
+    async def lookup_single_instrument(spec) -> InstrumentDetail:
+        symbol = spec['symbol'].upper()
         option_type = spec.get('option_type')
 
         if option_type:
-            strike_price = spec.get('strike_price')
+            # Validate option parameters
+            strike_price = validate_strike_price(spec.get('strike_price'))
             expiration_date = spec.get('expiration_date')
+            if not expiration_date:
+                raise ValueError(f"expiration_date is required for option {symbol}")
 
-            if not strike_price or not expiration_date:
-                logger.error(f"Option instrument {symbol} missing required fields - strike_price: {strike_price}, expiration_date: {expiration_date}")
-                raise ValueError("strike_price and expiration_date are required for option instruments")
+            target_date = validate_date_format(expiration_date)
+            option_type = option_type.upper()
+            if option_type not in ['C', 'P']:
+                raise ValueError(f"Invalid option_type '{option_type}'. Expected 'C' or 'P'.")
 
-            instrument = await find_option_instrument(session, symbol, expiration_date, option_type, strike_price)
-            return {
-                "symbol": symbol,
-                "option_type": option_type,
-                "strike_price": strike_price,
-                "expiration_date": expiration_date,
-                "streamer_symbol": instrument.streamer_symbol,
-                "instrument": instrument
-            }
+            # Get cached option chain and find specific option
+            chain = await get_cached_option_chain(session, symbol)
+            if target_date not in chain:
+                available_dates = sorted(chain.keys())
+                raise ValueError(f"No options found for {symbol} expiration {expiration_date}. Available: {available_dates}")
+
+            for option in chain[target_date]:
+                if (option.strike_price == strike_price and
+                    option.option_type.value == option_type):
+                    return InstrumentDetail(
+                        streamer_symbol=option.streamer_symbol,
+                        instrument=option
+                    )
+
+            available_strikes = [opt.strike_price for opt in chain[target_date] if opt.option_type.value == option_type]
+            raise ValueError(f"Option not found: {symbol} {expiration_date} {option_type} {strike_price}. Available strikes: {sorted(set(available_strikes))}")
         else:
+            # Get equity instrument
             instrument = await Equity.a_get(session, symbol)
-            return {
-                "symbol": symbol,
-                "streamer_symbol": symbol,
-                "instrument": instrument
-            }
+            return InstrumentDetail(
+                streamer_symbol=symbol,
+                instrument=instrument
+            )
 
     return await asyncio.gather(*[lookup_single_instrument(spec) for spec in instrument_specs])
-
-
-def build_order_legs(instrument_details: list[dict[str, Any]], legs: list[dict[str, Any]]) -> list:
-    """Build order legs from instrument details and leg specifications."""
-    built_legs = []
-    for detail, leg_spec in zip(instrument_details, legs):
-        action = leg_spec['action']
-        quantity = leg_spec['quantity']
-        instrument = detail['instrument']
-
-        # Determine order action based on type
-        if detail.get('option_type'):
-            order_action = OrderAction(action)
-        else:
-            order_action = OrderAction.BUY if action == 'Buy' else OrderAction.SELL
-
-        built_legs.append(instrument.build_leg(Decimal(str(quantity)), order_action))
-    return built_legs
-
-
-async def calculate_net_price(ctx: Context, instrument_details: list[dict[str, Any]], legs: list[dict[str, Any]]) -> float:
-    """Calculate net price from current market quotes."""
-    # Convert instrument_details format for get_quotes
-    instruments = []
-    for detail in instrument_details:
-        instrument = {"symbol": detail["symbol"]}
-        if "option_type" in detail:
-            instrument.update({
-                "option_type": detail["option_type"],
-                "strike_price": detail["strike_price"],
-                "expiration_date": detail["expiration_date"]
-            })
-        instruments.append(instrument)
-
-    # Get quotes using existing tool
-    quotes_data = await get_quotes(ctx, instruments)
-
-    # Calculate net price
-    net_price = 0.0
-    for quote_data, leg_spec in zip(quotes_data, legs):
-        if quote_data.get("bid_price") and quote_data.get("ask_price"):
-            mid_price = (quote_data["bid_price"] + quote_data["ask_price"]) / 2
-            leg_price = -mid_price if leg_spec['action'].startswith('Buy') else mid_price
-            net_price += leg_price * leg_spec['quantity']
-        else:
-            symbol_info = f"{quote_data['symbol']}"
-            if "option_type" in quote_data:
-                symbol_info += f" {quote_data['option_type']}{quote_data['strike_price']} {quote_data['expiration_date']}"
-            logger.warning(f"Could not get bid/ask prices for {symbol_info} - quote data: {quote_data}")
-            raise ValueError(f"Could not get bid/ask for {symbol_info}")
-
-    return round(net_price * 20) / 20
 
 
 @mcp_app.tool()
@@ -210,7 +201,7 @@ async def get_quotes(
     ctx: Context,
     instruments: list[dict[str, Any]],
     timeout: float = 10.0
-) -> list[dict[str, Any]]:
+) -> str:
     """
     Get live quotes for multiple stocks and/or options.
 
@@ -250,9 +241,9 @@ async def get_quotes(
                 if quote.event_symbol in expected_symbols:
                     quotes_by_symbol[quote.event_symbol] = quote
 
-            # Return combined quote data with instrument details
-            return [{**quotes_by_symbol[d["streamer_symbol"]].model_dump(), **d}
-                   for d in instrument_details]
+            # Return quotes in same order as input instruments
+            return to_table([quotes_by_symbol[d["streamer_symbol"]]
+                            for d in instrument_details])
 
     except asyncio.TimeoutError:
         logger.warning(f"Timeout getting quotes for {len(instruments)} instruments after {timeout}s")
@@ -267,7 +258,7 @@ async def get_greeks(
     ctx: Context,
     options: list[dict[str, Any]],
     timeout: float = 10.0
-) -> list[dict[str, Any]]:
+) -> str:
     """
     Get Greeks (delta, gamma, theta, vega, rho) for multiple options.
 
@@ -299,13 +290,15 @@ async def get_greeks(
 
             # Collect Greeks by symbol
             greeks_by_symbol = {}
-            for _ in option_details:
+            expected_symbols = {d["streamer_symbol"] for d in option_details}
+            while len(greeks_by_symbol) < len(option_details):
                 greeks = await asyncio.wait_for(streamer.get_event(Greeks), timeout=timeout)
-                greeks_by_symbol[greeks.event_symbol] = greeks
+                if greeks.event_symbol in expected_symbols:
+                    greeks_by_symbol[greeks.event_symbol] = greeks
 
-            # Return combined Greeks data with option details
-            return [{**greeks_by_symbol[d["streamer_symbol"]].model_dump(), **d}
-                   for d in option_details]
+            # Return Greeks in same order as input options
+            return to_table([greeks_by_symbol[d["streamer_symbol"]]
+                            for d in option_details])
 
     except asyncio.TimeoutError:
         logger.warning(f"Timeout getting Greeks for {len(options)} options after {timeout}s")
@@ -315,73 +308,90 @@ async def get_greeks(
         raise ValueError(f"Error getting Greeks: {str(e)}")
 
 
-@mcp_app.tool()
-async def get_net_liquidating_value_history(
-    ctx: Context,
-    time_back: Literal['1d', '1m', '3m', '6m', '1y', 'all'] = '1y'
-) -> list[dict[str, Any]]:
-    context = get_context(ctx)
-    return [h.model_dump() for h in await context.account.a_get_net_liquidating_value_history(context.session, time_back=time_back)]
-
+# =============================================================================
+# HISTORY TOOLS
+# =============================================================================
 
 @mcp_app.tool()
-async def get_trade_history(
+async def get_transaction_history(
     ctx: Context,
-    start_date: str | None = None,
-    end_date: str | None = None,
+    days: int = 90,
     underlying_symbol: str | None = None,
-    per_page: int = 250,
-    page_offset: int | None = None
-) -> list[dict[str, Any]]:
-    """Dates format: YYYY-MM-DD, default: last 90 days. Use page_offset to get specific pages if more than per_page results."""
+    transaction_type: Literal["Trade", "Money Movement"] | None = None
+) -> str:
+    """Get account transaction history including trades and money movements for the last N days (default: 90)."""
     context = get_context(ctx)
-    return [txn.model_dump() for txn in await context.account.a_get_history(
-        context.session,
-        start_date=date.today() - timedelta(days=90) if start_date is None else datetime.strptime(start_date, "%Y-%m-%d").date(),
-        end_date=None if end_date is None else datetime.strptime(end_date, "%Y-%m-%d").date(),
-        underlying_symbol=underlying_symbol,
-        per_page=per_page,
-        page_offset=page_offset
-    )]
+    all_trades = []
+    page_offset = 0
+    PER_PAGE = 250
+
+    while True:
+        async with rate_limiter:
+            trades = await context.account.a_get_history(
+                context.session,
+                start_date=date.today() - timedelta(days=days),
+                underlying_symbol=underlying_symbol,
+                type=transaction_type,
+                per_page=PER_PAGE,
+                page_offset=page_offset
+            )
+
+        if not trades or len(trades) < PER_PAGE:
+            all_trades.extend(trades or [])
+            break
+
+        all_trades.extend(trades)
+        page_offset += PER_PAGE
+
+    return to_table(all_trades)
 
 
 @mcp_app.tool()
 async def get_order_history(
     ctx: Context,
-    start_date: str | None = None,
-    end_date: str | None = None,
-    underlying_symbol: str | None = None,
-    per_page: int = 250,
-    page_offset: int | None = None
-) -> list[dict[str, Any]]:
-    """Dates format: YYYY-MM-DD, default: last 90 days. Use page_offset to get specific pages if more than per_page results."""
+    days: int = 7,
+    underlying_symbol: str | None = None
+) -> str:
+    """Get all order history for the last N days (default: 7)."""
     context = get_context(ctx)
+    all_orders = []
+    page_offset = 0
+    ORDER_PAGE_SIZE = 50  # Order history API max is 50 per page
 
-    orders = await context.account.a_get_order_history(
-        context.session,
-        start_date=date.today() - timedelta(days=90) if start_date is None else datetime.strptime(start_date, "%Y-%m-%d").date(),
-        end_date=None if end_date is None else datetime.strptime(end_date, "%Y-%m-%d").date(),
-        underlying_symbol=underlying_symbol,
-        per_page=per_page,
-        page_offset=page_offset
-    )
+    while True:
+        async with rate_limiter:
+            orders = await context.account.a_get_order_history(
+                context.session,
+                start_date=date.today() - timedelta(days=days),
+                underlying_symbol=underlying_symbol,
+                per_page=ORDER_PAGE_SIZE,
+                page_offset=page_offset
+            )
 
-    return [order.model_dump() for order in orders]
+        if not orders or len(orders) < ORDER_PAGE_SIZE:
+            all_orders.extend(orders or [])
+            break
+
+        all_orders.extend(orders)
+        page_offset += ORDER_PAGE_SIZE
+
+    return to_table(all_orders)
 
 
 @mcp_app.tool()
-async def get_market_metrics(ctx: Context, symbols: list[str]) -> list[dict[str, Any]]:
+async def get_market_metrics(ctx: Context, symbols: list[str]) -> str:
     """
     Get market metrics including volatility (IV/HV), risk (beta, correlation),
     valuation (P/E, market cap), liquidity, dividends, earnings, and options data.
 
     Note extreme IV rank/percentile (0-1): low = cheap options (buy opportunity), high = expensive options (close positions).
     """
-    return [m.model_dump() for m in await a_get_market_metrics(get_context(ctx).session, symbols)]
+    metrics = await a_get_market_metrics(get_context(ctx).session, symbols)
+    return to_table(metrics)
 
 
 @mcp_app.tool()
-async def market_status(ctx: Context, exchanges: list[Literal['Equity', 'CME', 'CFE', 'Smalls']] = ['Equity']) -> list[dict[str, Any]]:
+async def market_status(ctx: Context, exchanges: list[Literal['Equity', 'CME', 'CFE', 'Smalls']] = ['Equity']):
     """
     Get market status for each exchange including current open/closed state,
     next opening times, and holiday information.
@@ -427,15 +437,79 @@ async def market_status(ctx: Context, exchanges: list[Literal['Equity', 'CME', '
 
 
 @mcp_app.tool()
-async def search_symbols(ctx: Context, symbol: str) -> list[dict[str, Any]]:
+async def search_symbols(ctx: Context, symbol: str) -> str:
     """Search for symbols similar to the given search phrase."""
-    return [result.model_dump() for result in await a_symbol_search(get_context(ctx).session, symbol)]
+    async with rate_limiter:
+        results = await a_symbol_search(get_context(ctx).session, symbol)
+    return to_table(results)
+
+
+# =============================================================================
+# TRADING TOOLS
+# =============================================================================
+
+def build_order_legs(instrument_details: list[InstrumentDetail], legs: list[dict[str, Any]]) -> list:
+    """Build order legs from instrument details and leg specifications."""
+    built_legs = []
+    for detail, leg_spec in zip(instrument_details, legs):
+        action = leg_spec['action']
+        quantity = leg_spec['quantity']
+        instrument = detail['instrument']
+
+        # Determine order action based on instrument type
+        if isinstance(instrument, Option):
+            order_action = OrderAction(action)
+        else:
+            order_action = OrderAction.BUY if action == 'Buy' else OrderAction.SELL
+
+        built_legs.append(instrument.build_leg(Decimal(str(quantity)), order_action))
+    return built_legs
+
+
+async def calculate_net_price(ctx: Context, instrument_details: list[InstrumentDetail], legs: list[dict[str, Any]]) -> float:
+    """Calculate net price from current market quotes."""
+    # Convert instrument_details format for get_quotes
+    instruments = []
+    for detail in instrument_details:
+        instrument_obj = detail['instrument']
+        if isinstance(instrument_obj, Option):
+            instrument = {
+                "symbol": instrument_obj.underlying_symbol,
+                "option_type": instrument_obj.option_type.value,
+                "strike_price": float(instrument_obj.strike_price),
+                "expiration_date": instrument_obj.expiration_date.strftime("%Y-%m-%d")
+            }
+        else:
+            instrument = {"symbol": instrument_obj.symbol}
+        instruments.append(instrument)
+
+    # Get quotes using existing tool
+    quotes_data = await get_quotes(ctx, instruments)
+
+    # Calculate net price
+    net_price = 0.0
+    for quote_data, leg_spec in zip(quotes_data, legs):
+        if quote_data.get("bid_price") and quote_data.get("ask_price"):
+            mid_price = (quote_data["bid_price"] + quote_data["ask_price"]) / 2
+            leg_price = -mid_price if leg_spec['action'].startswith('Buy') else mid_price
+            net_price += leg_price * leg_spec['quantity']
+        else:
+            instrument_obj = instrument_details[quotes_data.index(quote_data)]['instrument']
+            if isinstance(instrument_obj, Option):
+                symbol_info = f"{instrument_obj.underlying_symbol} {instrument_obj.option_type.value}{instrument_obj.strike_price} {instrument_obj.expiration_date}"
+            else:
+                symbol_info = instrument_obj.symbol
+            logger.warning(f"Could not get bid/ask prices for {symbol_info} - quote data: {quote_data}")
+            raise ValueError(f"Could not get bid/ask for {symbol_info}")
+
+    return round(net_price * 100) / 100
 
 
 @mcp_app.tool()
-async def get_live_orders(ctx: Context) -> list[dict[str, Any]]:
+async def get_live_orders(ctx: Context) -> str:
     context = get_context(ctx)
-    return [order.model_dump() for order in await context.account.a_get_live_orders(context.session)]
+    orders = await context.account.a_get_live_orders(context.session)
+    return to_table(orders)
 
 
 @mcp_app.tool()
@@ -461,6 +535,8 @@ async def place_order(
         price: If None, calculates net mid-price from quotes.
                For debit orders (net buying), use negative values (e.g., -8.50).
                For credit orders (net selling), use positive values (e.g., 2.25).
+               NOTE: If Tastytrade returns a price granularity error, retry with price
+               rounded to nearest 5 cents.
         time_in_force: 'Day', 'GTC', or 'IOC'
         dry_run: If True, validates order without placing it
 
@@ -554,6 +630,10 @@ async def delete_order(ctx: Context, order_id: str) -> dict[str, Any]:
     return {"success": True, "order_id": order_id}
 
 
+# =============================================================================
+# WATCHLIST TOOLS
+# =============================================================================
+
 @mcp_app.tool()
 async def get_watchlists(
     ctx: Context,
@@ -562,7 +642,7 @@ async def get_watchlists(
 ) -> list[dict[str, Any]] | dict[str, Any]:
     """
     Get watchlists for market insights and tracking.
-    
+
     No name = list watchlist names. With name = get symbols in that watchlist. For private, default to "main".
     """
     context = get_context(ctx)
@@ -652,10 +732,18 @@ async def delete_private_watchlist(ctx: Context, name: str) -> None:
     await ctx.info(f"✅ Deleted private watchlist '{name}'")
 
 
+# =============================================================================
+# UTILITY TOOLS
+# =============================================================================
+
 @mcp_app.tool()
 async def get_current_time_nyc() -> str:
     return now_in_new_york().isoformat()
 
+
+# =============================================================================
+# ANALYSIS TOOLS
+# =============================================================================
 
 @mcp_app.prompt(title="IV Rank Analysis")
 def analyze_iv_opportunities() -> list[base.Message]:
@@ -692,17 +780,28 @@ async def generate_trade_ideas(
     """
     context = get_context(ctx)
 
+    # Track data collection failures
+    data_failures = []
+
     # Gather comprehensive market data using internal tastytrade methods
     try:
         # Get current positions directly from tastytrade
-        positions = await context.account.a_get_positions(context.session, include_marks=True)
-        position_symbols = list(set([pos.symbol for pos in positions]))
+        try:
+            positions = await context.account.a_get_positions(context.session, include_marks=True)
+            position_symbols = list(set([pos.symbol for pos in positions]))
+        except Exception as e:
+            logger.error(f"Failed to get positions: {e}")
+            data_failures.append(f"Could not retrieve current positions: {str(e)}")
+            positions = []
+            position_symbols = []
 
         # Get watchlist symbols directly from tastytrade
         try:
             main_watchlist = await PrivateWatchlist.a_get(context.session, "main")
             watchlist_symbols = [entry['symbol'] for entry in main_watchlist.watchlist_entries or []]
-        except Exception:
+        except Exception as e:
+            logger.error(f"Failed to get watchlist: {e}")
+            data_failures.append(f"Could not retrieve watchlist data: {str(e)}")
             watchlist_symbols = []
 
         # Determine symbols to analyze
@@ -712,10 +811,17 @@ async def generate_trade_ideas(
             analysis_symbols = list(set(position_symbols + watchlist_symbols))
 
         if not analysis_symbols:
+            if data_failures:
+                return "Cannot generate trade ideas due to data collection failures:\n" + "\n".join(data_failures)
             return "No symbols found to analyze. Add symbols to watchlist or specify focus_symbols."
 
         # Get market metrics directly from tastytrade (limit to avoid rate limits)
-        market_metrics = await a_get_market_metrics(context.session, analysis_symbols[:10])
+        try:
+            market_metrics = await a_get_market_metrics(context.session, analysis_symbols[:10])
+        except Exception as e:
+            logger.error(f"Failed to get market metrics: {e}")
+            data_failures.append(f"Could not retrieve market metrics: {str(e)}")
+            market_metrics = []
 
         # Get current time
         current_time = now_in_new_york().isoformat()
@@ -746,6 +852,11 @@ async def generate_trade_ideas(
                 "lendability": metric.lendability
             })
 
+        # Include data availability status in prompt
+        data_status = ""
+        if data_failures:
+            data_status = "\n\nDATA COLLECTION FAILURES:\n" + "\n".join(f"- {failure}" for failure in data_failures)
+
         # Create comprehensive prompt for trade idea generation
         analysis_prompt = f"""You are an expert options trader analyzing market opportunities. Current time: {current_time}
 
@@ -755,9 +866,11 @@ CURRENT POSITIONS:
 MARKET METRICS:
 {metrics_summary}
 
-RISK TOLERANCE: {risk_tolerance}
+RISK TOLERANCE: {risk_tolerance}{data_status}
 
-Generate {max_ideas} specific, actionable trade ideas based on this data. For each trade idea provide:
+IMPORTANT: If any required data is missing or failed to collect (as noted above), you MUST clearly state what data is unavailable and explain that you cannot generate reliable trade ideas without this information. DO NOT fabricate or guess at missing data like IV ranks, positions, or market metrics. Instead, inform the user about the data collection failures and suggest they try again or check their connection/authentication.
+
+Only generate trade ideas if you have sufficient real data. If generating ideas, provide {max_ideas} specific, actionable trade ideas based on the available data:
 
 1. SYMBOL & STRATEGY: Clear trade description (e.g., "AAPL Iron Condor", "TSLA Short Strangle")
 2. RATIONALE: Why this trade makes sense given current IV rank, positions, and market conditions

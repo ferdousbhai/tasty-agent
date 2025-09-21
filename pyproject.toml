@@ -9,6 +9,8 @@ dependencies = [
     "tastytrade>=10.3.0",
     "humanize>=4.12.3",
     "aiolimiter==1.2.1",
+    "tabulate>=0.9.0",
+    "aiocache>=0.12.2",
 ]
 authors = [{ name = "Ferdous", email = "ferdous@hey.com" }]
 keywords = ["tastytrade", "trading", "mcp", "model context protocol", "broker", "robinhood", "wallstreetbets"]
