@@ -17,8 +17,8 @@ A Model Context Protocol server for TastyTrade brokerage accounts. Enables LLMs 
 - **`get_balances()`** - Account balances and buying power
 - **`get_positions()`** - All open positions with current values
 - **`get_net_liquidating_value_history(time_back='1y')`** - Portfolio value history ('1d', '1m', '3m', '6m', '1y', 'all')
-- **`get_trade_history(start_date=None, end_date=None, underlying_symbol=None, per_page=250, page_offset=None)`** - Trading transaction history (format: YYYY-MM-DD, default: last 90 days)
-- **`get_order_history(start_date=None, end_date=None, underlying_symbol=None, per_page=250, page_offset=None)`** - Order history including filled, canceled, and rejected orders (format: YYYY-MM-DD, default: last 90 days)
+- **`get_transaction_history(days=90, underlying_symbol=None, transaction_type=None)`** - All transactions: trades + cash flows (default: last 90 days, transaction_type: 'Trade' or 'Money Movement')
+- **`get_order_history(days=7, underlying_symbol=None)`** - Order history including filled, canceled, and rejected orders (default: last 7 days)
 
 ### Market Data & Research
 - **`get_quotes(instruments, timeout=10.0)`** - Real-time quotes for multiple stocks and/or options via DXLink streaming
@@ -61,7 +61,6 @@ A Model Context Protocol server for TastyTrade brokerage accounts. Enables LLMs 
 
 ### Rate Limiting & Reliability
 - Built-in rate limiting (2 requests/second) prevents API throttling
-- Option chain caching reduces redundant API calls
 - Comprehensive error handling and logging
 
 ### MCP Client Configuration
@@ -79,9 +78,14 @@ Add to your MCP client configuration (e.g., `claude_desktop_config.json`):
         "TASTYTRADE_ACCOUNT_ID": "your_account_id"
       }
     }
+  },
+  "capabilities": {
+    "sampling": {}
   }
 }
 ```
+
+*Note: The `sampling` capability enables AI-powered trade analysis features. Currently supported in VS Code, not yet in Claude Desktop.*
 
 ## Examples
 
@@ -138,9 +142,9 @@ For interactive testing during development:
 # Set up environment variables in .env file:
 # TASTYTRADE_CLIENT_SECRET=your_secret
 # TASTYTRADE_REFRESH_TOKEN=your_token
-# TASTYTRADE_ACCOUNT_ID=your_account_id (optional, defaults to the first account)
+# TASTYTRADE_ACCOUNT_ID=your_account_id (defaults to the first account)
 # OPENAI_API_KEY=your_openai_key (you can provide alternative provider of your choice as supported by pydantic-ai)
-# MODEL_IDENTIFIER=model_provider:model_name (optional - defaults to openai:gpt-4.1)
+# MODEL_IDENTIFIER=model_provider:model_name (defaults to openai:gpt-5-mini)
 
 
 # Run the interactive client

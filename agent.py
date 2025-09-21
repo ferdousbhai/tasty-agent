@@ -11,10 +11,7 @@ load_dotenv()
 def create_tastytrader_agent() -> Agent:
     """Create and return a configured agent instance."""
 
-    model_identifier = os.getenv('MODEL_IDENTIFIER', 'openai:gpt-4.1')
-    if not model_identifier:
-        logger.error("MODEL_IDENTIFIER environment variable is required")
-        raise ValueError("MODEL_IDENTIFIER environment variable is required")
+    model_identifier = os.getenv('MODEL_IDENTIFIER', 'openai:gpt-5-mini')
 
     logger.info(f"Creating agent with model: {model_identifier}")
 
