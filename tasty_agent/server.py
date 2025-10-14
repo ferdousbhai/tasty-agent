@@ -6,7 +6,7 @@ from decimal import Decimal
 import logging
 import os
 from typing import Literal, AsyncIterator, Any, Sequence, TypedDict
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from aiocache import cached, Cache
 from aiocache.serializers import PickleSerializer
@@ -126,6 +126,30 @@ class InstrumentDetail(TypedDict):
     instrument: Equity | Option
 
 
+class InstrumentSpec(BaseModel):
+    """Specification for an instrument (stock or option)."""
+    symbol: str = Field(..., description="Stock symbol (e.g., 'AAPL', 'TQQQ')")
+    option_type: Literal['C', 'P'] | None = Field(None, description="Option type: 'C' for call, 'P' for put (omit for stocks)")
+    strike_price: float | None = Field(None, description="Strike price (required for options)")
+    expiration_date: str | None = Field(None, description="Expiration date in YYYY-MM-DD format (required for options)")
+
+
+class OrderLeg(BaseModel):
+    """Specification for an order leg."""
+    symbol: str = Field(..., description="Stock symbol (e.g., 'TQQQ', 'AAPL')")
+    action: str = Field(..., description="For stocks: 'Buy' or 'Sell'. For options: 'Buy to Open', 'Buy to Close', 'Sell to Open', 'Sell to Close'")
+    quantity: int = Field(..., description="Number of contracts/shares")
+    option_type: Literal['C', 'P'] | None = Field(None, description="Option type: 'C' for call, 'P' for put (omit for stocks)")
+    strike_price: float | None = Field(None, description="Strike price (required for options)")
+    expiration_date: str | None = Field(None, description="Expiration date in YYYY-MM-DD format (required for options)")
+
+
+class WatchlistSymbol(BaseModel):
+    """Symbol specification for watchlist operations."""
+    symbol: str = Field(..., description="Stock symbol (e.g., 'AAPL', 'TSLA')")
+    instrument_type: str = Field(..., description="One of: 'Equity', 'Equity Option', 'Future', 'Future Option', 'Cryptocurrency', 'Warrant'")
+
+
 def validate_date_format(date_string: str) -> date:
     """Validate date format and return date object."""
     try:
@@ -151,16 +175,16 @@ async def get_cached_option_chain(session: OAuthSession, symbol: str):
     return await a_get_option_chain(session, symbol)
 
 
-async def get_instrument_details(session: OAuthSession, instrument_specs: list[dict[str, Any]]) -> list[InstrumentDetail]:
+async def get_instrument_details(session: OAuthSession, instrument_specs: list[InstrumentSpec]) -> list[InstrumentDetail]:
     """Get instrument details with validation and caching."""
-    async def lookup_single_instrument(spec) -> InstrumentDetail:
-        symbol = spec['symbol'].upper()
-        option_type = spec.get('option_type')
+    async def lookup_single_instrument(spec: InstrumentSpec) -> InstrumentDetail:
+        symbol = spec.symbol.upper()
+        option_type = spec.option_type
 
         if option_type:
             # Validate option parameters
-            strike_price = validate_strike_price(spec.get('strike_price'))
-            expiration_date = spec.get('expiration_date')
+            strike_price = validate_strike_price(spec.strike_price)
+            expiration_date = spec.expiration_date
             if not expiration_date:
                 raise ValueError(f"expiration_date is required for option {symbol}")
 
@@ -199,14 +223,14 @@ async def get_instrument_details(session: OAuthSession, instrument_specs: list[d
 @mcp_app.tool()
 async def get_quotes(
     ctx: Context,
-    instruments: list[dict[str, Any]],
+    instruments: list[InstrumentSpec],
     timeout: float = 10.0
 ) -> str:
     """
     Get live quotes for multiple stocks and/or options.
 
     Args:
-        instruments: List of instrument specifications. Each dict contains:
+        instruments: List of instrument specifications. Each contains:
             - symbol: str - Stock symbol (e.g., 'AAPL', 'TQQQ')
             - option_type: 'C' or 'P' (optional, omit for stocks)
             - strike_price: float (required for options)
@@ -249,21 +273,21 @@ async def get_quotes(
         logger.warning(f"Timeout getting quotes for {len(instruments)} instruments after {timeout}s")
         raise ValueError(f"Timeout getting quotes after {timeout}s")
     except Exception as e:
-        logger.error(f"Error getting quotes for instruments {[i.get('symbol') for i in instruments]}: {str(e)}")
+        logger.error(f"Error getting quotes for instruments {[i.symbol for i in instruments]}: {str(e)}")
         raise ValueError(f"Error getting quotes: {str(e)}")
 
 
 @mcp_app.tool()
 async def get_greeks(
     ctx: Context,
-    options: list[dict[str, Any]],
+    options: list[InstrumentSpec],
     timeout: float = 10.0
 ) -> str:
     """
     Get Greeks (delta, gamma, theta, vega, rho) for multiple options.
 
     Args:
-        options: List of option specifications. Each dict contains:
+        options: List of option specifications. Each contains:
             - symbol: str - Stock symbol (e.g., 'AAPL', 'TQQQ')
             - option_type: 'C' or 'P'
             - strike_price: float - Strike price of the option
@@ -304,7 +328,7 @@ async def get_greeks(
         logger.warning(f"Timeout getting Greeks for {len(options)} options after {timeout}s")
         raise ValueError(f"Timeout getting Greeks after {timeout}s")
     except Exception as e:
-        logger.error(f"Error getting Greeks for options {[opt.get('symbol') for opt in options]}: {str(e)}")
+        logger.error(f"Error getting Greeks for options {[opt.symbol for opt in options]}: {str(e)}")
         raise ValueError(f"Error getting Greeks: {str(e)}")
 
 
@@ -448,12 +472,12 @@ async def search_symbols(ctx: Context, symbol: str) -> str:
 # TRADING TOOLS
 # =============================================================================
 
-def build_order_legs(instrument_details: list[InstrumentDetail], legs: list[dict[str, Any]]) -> list:
+def build_order_legs(instrument_details: list[InstrumentDetail], legs: list[OrderLeg]) -> list:
     """Build order legs from instrument details and leg specifications."""
     built_legs = []
     for detail, leg_spec in zip(instrument_details, legs):
-        action = leg_spec['action']
-        quantity = leg_spec['quantity']
+        action = leg_spec.action
+        quantity = leg_spec.quantity
         instrument = detail['instrument']
 
         # Determine order action based on instrument type
@@ -466,21 +490,21 @@ def build_order_legs(instrument_details: list[InstrumentDetail], legs: list[dict
     return built_legs
 
 
-async def calculate_net_price(ctx: Context, instrument_details: list[InstrumentDetail], legs: list[dict[str, Any]]) -> float:
+async def calculate_net_price(ctx: Context, instrument_details: list[InstrumentDetail], legs: list[OrderLeg]) -> float:
     """Calculate net price from current market quotes."""
     # Convert instrument_details format for get_quotes
     instruments = []
     for detail in instrument_details:
         instrument_obj = detail['instrument']
         if isinstance(instrument_obj, Option):
-            instrument = {
-                "symbol": instrument_obj.underlying_symbol,
-                "option_type": instrument_obj.option_type.value,
-                "strike_price": float(instrument_obj.strike_price),
-                "expiration_date": instrument_obj.expiration_date.strftime("%Y-%m-%d")
-            }
+            instrument = InstrumentSpec(
+                symbol=instrument_obj.underlying_symbol,
+                option_type=instrument_obj.option_type.value,
+                strike_price=float(instrument_obj.strike_price),
+                expiration_date=instrument_obj.expiration_date.strftime("%Y-%m-%d")
+            )
         else:
-            instrument = {"symbol": instrument_obj.symbol}
+            instrument = InstrumentSpec(symbol=instrument_obj.symbol)
         instruments.append(instrument)
 
     # Get quotes using existing tool
@@ -491,8 +515,8 @@ async def calculate_net_price(ctx: Context, instrument_details: list[InstrumentD
     for quote_data, leg_spec in zip(quotes_data, legs):
         if quote_data.get("bid_price") and quote_data.get("ask_price"):
             mid_price = (quote_data["bid_price"] + quote_data["ask_price"]) / 2
-            leg_price = -mid_price if leg_spec['action'].startswith('Buy') else mid_price
-            net_price += leg_price * leg_spec['quantity']
+            leg_price = -mid_price if leg_spec.action.startswith('Buy') else mid_price
+            net_price += leg_price * leg_spec.quantity
         else:
             instrument_obj = instrument_details[quotes_data.index(quote_data)]['instrument']
             if isinstance(instrument_obj, Option):
@@ -515,7 +539,7 @@ async def get_live_orders(ctx: Context) -> str:
 @mcp_app.tool()
 async def place_order(
     ctx: Context,
-    legs: list[dict[str, Any]],
+    legs: list[OrderLeg],
     price: float | None = None,
     time_in_force: Literal['Day', 'GTC', 'IOC'] = 'Day',
     dry_run: bool = False
@@ -524,7 +548,7 @@ async def place_order(
     Place multi-leg options/equity orders.
 
     Args:
-        legs: List of leg specifications. Each leg dict contains:
+        legs: List of leg specifications. Each leg contains:
             - symbol: str - Stock symbol (e.g., 'TQQQ', 'AAPL')
             - action: For stocks: 'Buy' or 'Sell'
                      For options: 'Buy to Open', 'Buy to Close', 'Sell to Open', 'Sell to Close'
@@ -563,7 +587,7 @@ async def place_order(
                 await ctx.info(f"💰 Auto-calculated net mid-price: ${price:.2f}")
                 logger.info(f"Auto-calculated price ${price:.2f} for {len(legs)}-leg order")
             except Exception as e:
-                logger.warning(f"Failed to auto-calculate price for order legs {[leg.get('symbol') for leg in legs]}: {str(e)}")
+                logger.warning(f"Failed to auto-calculate price for order legs {[leg.symbol for leg in legs]}: {str(e)}")
                 raise ValueError(f"Could not fetch quotes for price calculation: {str(e)}. Please provide a price.")
 
         return (await context.account.a_place_order(
@@ -655,7 +679,7 @@ async def get_watchlists(
 async def manage_private_watchlist(
     ctx: Context,
     action: Literal["add", "remove"],
-    symbols: list[dict[str, Any]],
+    symbols: list[WatchlistSymbol],
     name: str = "main"
 ) -> None:
     """
@@ -663,7 +687,7 @@ async def manage_private_watchlist(
 
     Args:
         action: "add" or "remove"
-        symbols: List of symbol specifications. Each dict contains:
+        symbols: List of symbol specifications. Each contains:
             - symbol: str - Stock symbol (e.g., "AAPL", "TSLA")
             - instrument_type: str - One of: "Equity", "Equity Option", "Future", "Future Option", "Cryptocurrency", "Warrant"
         name: Watchlist name (defaults to "main")
@@ -688,17 +712,17 @@ async def manage_private_watchlist(
         try:
             watchlist = await PrivateWatchlist.a_get(context.session, name)
             for symbol_spec in symbols:
-                symbol = symbol_spec['symbol']
-                instrument_type = symbol_spec['instrument_type']
+                symbol = symbol_spec.symbol
+                instrument_type = symbol_spec.instrument_type
                 watchlist.add_symbol(symbol, instrument_type)
             await watchlist.a_update(context.session)
             logger.info(f"Added {len(symbols)} symbols to existing watchlist '{name}'")
 
-            symbol_list = [f"{s['symbol']} ({s['instrument_type']})" for s in symbols]
+            symbol_list = [f"{s.symbol} ({s.instrument_type})" for s in symbols]
             await ctx.info(f"✅ Added {len(symbols)} symbols to watchlist '{name}': {', '.join(symbol_list)}")
         except Exception as e:
             logger.info(f"Watchlist '{name}' not found, creating new one: {e}")
-            watchlist_entries = [{"symbol": s['symbol'], "instrument_type": s['instrument_type']} for s in symbols]
+            watchlist_entries = [{"symbol": s.symbol, "instrument_type": s.instrument_type} for s in symbols]
             watchlist = PrivateWatchlist(
                 name=name,
                 group_name="main",
@@ -706,19 +730,19 @@ async def manage_private_watchlist(
             )
             await watchlist.a_upload(context.session)
             logger.info(f"Created new watchlist '{name}' with {len(symbols)} symbols")
-            symbol_list = [f"{s['symbol']} ({s['instrument_type']})" for s in symbols]
+            symbol_list = [f"{s.symbol} ({s.instrument_type})" for s in symbols]
             await ctx.info(f"✅ Created watchlist '{name}' and added {len(symbols)} symbols: {', '.join(symbol_list)}")
     else:
         try:
             watchlist = await PrivateWatchlist.a_get(context.session, name)
             for symbol_spec in symbols:
-                symbol = symbol_spec['symbol']
-                instrument_type = symbol_spec['instrument_type']
+                symbol = symbol_spec.symbol
+                instrument_type = symbol_spec.instrument_type
                 watchlist.remove_symbol(symbol, instrument_type)
             await watchlist.a_update(context.session)
             logger.info(f"Removed {len(symbols)} symbols from watchlist '{name}'")
 
-            symbol_list = [f"{s['symbol']} ({s['instrument_type']})" for s in symbols]
+            symbol_list = [f"{s.symbol} ({s.instrument_type})" for s in symbols]
             await ctx.info(f"✅ Removed {len(symbols)} symbols from watchlist '{name}': {', '.join(symbol_list)}")
         except Exception as e:
             logger.error(f"Failed to remove symbols from watchlist '{name}': {e}")
