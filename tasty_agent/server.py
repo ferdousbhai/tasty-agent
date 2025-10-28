@@ -17,7 +17,7 @@ from mcp.server.fastmcp.prompts import base
 from mcp.server.session import ServerSession
 from mcp.types import SamplingMessage, TextContent
 from tabulate import tabulate
-from tastytrade import OAuthSession, Account
+from tastytrade import Session, Account
 from tastytrade.dxfeed import Quote, Greeks
 from tastytrade.instruments import Equity, Option, a_get_option_chain
 from tastytrade.market_sessions import a_get_market_sessions, a_get_market_holidays, ExchangeType, MarketStatus
@@ -40,7 +40,7 @@ def to_table(data: Sequence[BaseModel]) -> str:
 
 @dataclass
 class ServerContext:
-    session: OAuthSession
+    session: Session
     account: Account
 
 
@@ -64,7 +64,7 @@ async def lifespan(_) -> AsyncIterator[ServerContext]:
         )
 
     try:
-        session = OAuthSession(client_secret, refresh_token)
+        session = Session(client_secret, refresh_token)
         accounts = Account.get(session)
         logger.info(f"Successfully authenticated with Tastytrade. Found {len(accounts)} account(s).")
     except Exception as e:
@@ -170,12 +170,12 @@ def validate_strike_price(strike_price: Any) -> float:
 
 
 @cached(ttl=86400, cache=Cache.MEMORY, serializer=PickleSerializer())  # 24 hours
-async def get_cached_option_chain(session: OAuthSession, symbol: str):
+async def get_cached_option_chain(session: Session, symbol: str):
     """Cache option chains for 24 hours as they rarely change during that timeframe."""
     return await a_get_option_chain(session, symbol)
 
 
-async def get_instrument_details(session: OAuthSession, instrument_specs: list[InstrumentSpec]) -> list[InstrumentDetail]:
+async def get_instrument_details(session: Session, instrument_specs: list[InstrumentSpec]) -> list[InstrumentDetail]:
     """Get instrument details with validation and caching."""
     async def lookup_single_instrument(spec: InstrumentSpec) -> InstrumentDetail:
         symbol = spec.symbol.upper()

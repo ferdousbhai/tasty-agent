@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import typer
-from tastytrade.session import OAuthSession
+from tastytrade.session import Session
 from tastytrade.market_sessions import a_get_market_sessions, ExchangeType, MarketStatus
 
 from agent import create_tastytrader_agent # loads .env internally
@@ -21,13 +21,13 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def create_tastytrade_session() -> OAuthSession:
+def create_tastytrade_session() -> Session:
     """Create and return a configured TastyTrade session."""
     client_secret = os.getenv("TASTYTRADE_CLIENT_SECRET")
     refresh_token = os.getenv("TASTYTRADE_REFRESH_TOKEN")
     if not client_secret or not refresh_token:
         raise ValueError("Missing required TastyTrade environment variables")
-    return OAuthSession(client_secret, refresh_token)
+    return Session(client_secret, refresh_token)
 
 
 def check_market_open() -> bool:
