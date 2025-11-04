@@ -20,7 +20,6 @@ def create_tastytrader_agent() -> Agent:
             'uv', args=['run', 'tasty-agent', 'stdio'], timeout=60, env=dict(os.environ)
         )
         agent = Agent(model_identifier, toolsets=[server])
-        agent.set_mcp_sampling_model() # Allows MCP server to make LLM calls via the MCP client
 
         logger.info("TastyTrader agent created successfully")
         return agent

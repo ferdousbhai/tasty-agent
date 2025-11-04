@@ -14,15 +14,13 @@ from aiolimiter import AsyncLimiter
 import humanize
 from mcp.server.fastmcp import FastMCP, Context
 from mcp.server.fastmcp.prompts import base
-from mcp.server.session import ServerSession
-from mcp.types import SamplingMessage, TextContent
 from tabulate import tabulate
 from tastytrade import Session, Account
 from tastytrade.dxfeed import Quote, Greeks
 from tastytrade.instruments import Equity, Option, a_get_option_chain
 from tastytrade.market_sessions import a_get_market_sessions, a_get_market_holidays, ExchangeType, MarketStatus
 from tastytrade.metrics import a_get_market_metrics
-from tastytrade.order import NewOrder, OrderAction, OrderTimeInForce, OrderType
+from tastytrade.order import NewOrder, OrderAction, OrderTimeInForce, OrderType, InstrumentType
 from tastytrade.search import a_symbol_search
 from tastytrade.streamer import DXLinkStreamer
 from tastytrade.utils import now_in_new_york
@@ -504,7 +502,12 @@ async def calculate_net_price(ctx: Context, instrument_details: list[InstrumentD
                 expiration_date=instrument_obj.expiration_date.strftime("%Y-%m-%d")
             )
         else:
-            instrument = InstrumentSpec(symbol=instrument_obj.symbol)
+            instrument = InstrumentSpec(
+                symbol=instrument_obj.symbol,
+                option_type=None,
+                strike_price=None,
+                expiration_date=None
+            )
         instruments.append(instrument)
 
     # Get quotes using existing tool
@@ -578,7 +581,17 @@ async def place_order(
             raise ValueError("At least one leg is required")
 
         context = get_context(ctx)
-        instrument_details = await get_instrument_details(context.session, legs)
+        # Convert OrderLeg to InstrumentSpec for instrument lookup
+        instrument_specs = [
+            InstrumentSpec(
+                symbol=leg.symbol,
+                option_type=leg.option_type,
+                strike_price=leg.strike_price,
+                expiration_date=leg.expiration_date
+            )
+            for leg in legs
+        ]
+        instrument_details = await get_instrument_details(context.session, instrument_specs)
 
         # Calculate price if not provided
         if price is None:
@@ -713,7 +726,7 @@ async def manage_private_watchlist(
             watchlist = await PrivateWatchlist.a_get(context.session, name)
             for symbol_spec in symbols:
                 symbol = symbol_spec.symbol
-                instrument_type = symbol_spec.instrument_type
+                instrument_type = InstrumentType(symbol_spec.instrument_type)
                 watchlist.add_symbol(symbol, instrument_type)
             await watchlist.a_update(context.session)
             logger.info(f"Added {len(symbols)} symbols to existing watchlist '{name}'")
@@ -737,7 +750,7 @@ async def manage_private_watchlist(
             watchlist = await PrivateWatchlist.a_get(context.session, name)
             for symbol_spec in symbols:
                 symbol = symbol_spec.symbol
-                instrument_type = symbol_spec.instrument_type
+                instrument_type = InstrumentType(symbol_spec.instrument_type)
                 watchlist.remove_symbol(symbol, instrument_type)
             await watchlist.a_update(context.session)
             logger.info(f"Removed {len(symbols)} symbols from watchlist '{name}'")
@@ -784,147 +797,3 @@ Focus on identifying extremes:
 Use the get_positions, get_watchlists, and get_market_metrics tools to gather this data."""),
         base.AssistantMessage("""I'll analyze IV opportunities for your positions and watchlist. Let me start by gathering your current positions and watchlist data, then get market metrics for each symbol to assess IV rank extremes and liquidity.""")
     ]
-
-
-@mcp_app.tool()
-async def generate_trade_ideas(
-    ctx: Context[ServerSession, None],
-    focus_symbols: list[str] | None = None,
-    risk_tolerance: Literal["conservative", "moderate", "aggressive"] = "moderate",
-    max_ideas: int = 5
-) -> str:
-    """
-    Generate specific, actionable trade ideas using AI analysis of current positions,
-    watchlists, market metrics, and volatility environment.
-
-    Args:
-        focus_symbols: Optional list of symbols to focus analysis on. If None, analyzes all positions and watchlist symbols.
-        risk_tolerance: Risk preference for trade suggestions
-        max_ideas: Maximum number of trade ideas to generate
-    """
-    context = get_context(ctx)
-
-    # Track data collection failures
-    data_failures = []
-
-    # Gather comprehensive market data using internal tastytrade methods
-    try:
-        # Get current positions directly from tastytrade
-        try:
-            positions = await context.account.a_get_positions(context.session, include_marks=True)
-            position_symbols = list(set([pos.symbol for pos in positions]))
-        except Exception as e:
-            logger.error(f"Failed to get positions: {e}")
-            data_failures.append(f"Could not retrieve current positions: {str(e)}")
-            positions = []
-            position_symbols = []
-
-        # Get watchlist symbols directly from tastytrade
-        try:
-            main_watchlist = await PrivateWatchlist.a_get(context.session, "main")
-            watchlist_symbols = [entry['symbol'] for entry in main_watchlist.watchlist_entries or []]
-        except Exception as e:
-            logger.error(f"Failed to get watchlist: {e}")
-            data_failures.append(f"Could not retrieve watchlist data: {str(e)}")
-            watchlist_symbols = []
-
-        # Determine symbols to analyze
-        if focus_symbols:
-            analysis_symbols = focus_symbols
-        else:
-            analysis_symbols = list(set(position_symbols + watchlist_symbols))
-
-        if not analysis_symbols:
-            if data_failures:
-                return "Cannot generate trade ideas due to data collection failures:\n" + "\n".join(data_failures)
-            return "No symbols found to analyze. Add symbols to watchlist or specify focus_symbols."
-
-        # Get market metrics directly from tastytrade (limit to avoid rate limits)
-        try:
-            market_metrics = await a_get_market_metrics(context.session, analysis_symbols[:10])
-        except Exception as e:
-            logger.error(f"Failed to get market metrics: {e}")
-            data_failures.append(f"Could not retrieve market metrics: {str(e)}")
-            market_metrics = []
-
-        # Get current time
-        current_time = now_in_new_york().isoformat()
-
-        # Prepare data summary for LLM
-        positions_summary = []
-        for pos in positions:
-            positions_summary.append({
-                "symbol": pos.symbol,
-                "quantity": float(pos.quantity),
-                "instrument_type": pos.instrument_type.value,
-                "mark_price": float(pos.mark_price) if pos.mark_price else None,
-                "average_open_price": float(pos.average_open_price),
-                "underlying_symbol": pos.underlying_symbol
-            })
-
-        metrics_summary = []
-        for metric in market_metrics:
-            metrics_summary.append({
-                "symbol": metric.symbol,
-                "iv_rank": metric.implied_volatility_index_rank,
-                "iv_percentile": metric.implied_volatility_percentile,
-                "liquidity_value": metric.liquidity_value,
-                "liquidity_rank": metric.liquidity_rank,
-                "liquidity_rating": metric.liquidity_rating,
-                "market_cap": float(metric.market_cap) if metric.market_cap else None,
-                "beta": float(metric.beta) if metric.beta else None,
-                "lendability": metric.lendability
-            })
-
-        # Include data availability status in prompt
-        data_status = ""
-        if data_failures:
-            data_status = "\n\nDATA COLLECTION FAILURES:\n" + "\n".join(f"- {failure}" for failure in data_failures)
-
-        # Create comprehensive prompt for trade idea generation
-        analysis_prompt = f"""You are an expert options trader analyzing market opportunities. Current time: {current_time}
-
-CURRENT POSITIONS:
-{positions_summary}
-
-MARKET METRICS:
-{metrics_summary}
-
-RISK TOLERANCE: {risk_tolerance}{data_status}
-
-IMPORTANT: If any required data is missing or failed to collect (as noted above), you MUST clearly state what data is unavailable and explain that you cannot generate reliable trade ideas without this information. DO NOT fabricate or guess at missing data like IV ranks, positions, or market metrics. Instead, inform the user about the data collection failures and suggest they try again or check their connection/authentication.
-
-Only generate trade ideas if you have sufficient real data. If generating ideas, provide {max_ideas} specific, actionable trade ideas based on the available data:
-
-1. SYMBOL & STRATEGY: Clear trade description (e.g., "AAPL Iron Condor", "TSLA Short Strangle")
-2. RATIONALE: Why this trade makes sense given current IV rank, positions, and market conditions
-3. SPECIFIC DETAILS: Strike prices, expiration, entry criteria
-4. RISK/REWARD: Expected profit/loss profile and maximum risk
-5. MANAGEMENT: When to adjust or exit
-
-Focus on:
-- IV rank extremes (high IV rank = selling opportunities, low IV rank = buying opportunities)
-- Portfolio balance and correlation
-- Liquidity considerations
-- Risk-appropriate strategies for {risk_tolerance} tolerance
-
-Be specific and actionable - provide exact strikes and expirations where possible."""
-
-        # Use LLM sampling to generate trade ideas
-        result = await ctx.session.create_message(
-            messages=[
-                SamplingMessage(
-                    role="user",
-                    content=TextContent(type="text", text=analysis_prompt),
-                )
-            ],
-            max_tokens=1500,
-        )
-
-        if result.content.type == "text":
-            return result.content.text
-        return str(result.content)
-
-    except Exception as e:
-        logger.error(f"Error generating trade ideas: {e}")
-        return f"Error generating trade ideas: {str(e)}"

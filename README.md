@@ -1,7 +1,7 @@
 # tasty-agent: A TastyTrade MCP Server
 [![Trust Score](https://archestra.ai/mcp-catalog/api/badge/quality/ferdousbhai/tasty-agent)](https://archestra.ai/mcp-catalog/ferdousbhai__tasty-agent)
 
-A Model Context Protocol server for TastyTrade brokerage accounts. Enables LLMs to monitor portfolios, analyze positions, and execute trades. Features AI-powered trade idea generation, automated IV analysis prompts, and built-in rate limiting (2 requests/second) to prevent API errors.
+A Model Context Protocol server for TastyTrade brokerage accounts. Enables LLMs to monitor portfolios, analyze positions, and execute trades. Features automated IV analysis prompts and built-in rate limiting (2 requests/second) to prevent API errors.
 
 ## Authentication
 
@@ -42,9 +42,6 @@ A Model Context Protocol server for TastyTrade brokerage accounts. Enables LLMs 
 - **`manage_private_watchlist(action, symbols, name='main')`** - Add/remove multiple symbols from private watchlists
 - **`delete_private_watchlist(name)`** - Delete private watchlist
 
-### AI-Powered Analysis
-- **`generate_trade_ideas(focus_symbols=None, risk_tolerance='moderate', max_ideas=5)`** - Generate specific, actionable trade ideas using AI analysis of current positions, watchlists, market metrics, and volatility environment
-
 ### MCP Prompts
 - **IV Rank Analysis** - Automated prompt to analyze IV rank extremes across positions and watchlists for entry/exit opportunities
 
@@ -54,11 +51,6 @@ A Model Context Protocol server for TastyTrade brokerage accounts. Enables LLMs 
 - Automatic price calculation from real-time market quotes when no price specified
 - Multi-leg options strategies (spreads, strangles, etc.) with single function call
 - Dry-run mode for testing orders without execution
-
-### AI-Powered Trading Assistant
-- **Trade Idea Generation**: Uses AI to analyze current positions, watchlists, market metrics, and volatility to generate specific actionable trade ideas
-- **IV Analysis Prompts**: Pre-built prompts to identify extreme IV rank conditions for entry/exit opportunities
-- Risk-adjusted suggestions based on conservative/moderate/aggressive tolerance levels
 
 ### Rate Limiting & Reliability
 - Built-in rate limiting (2 requests/second) prevents API throttling
@@ -79,14 +71,9 @@ Add to your MCP client configuration (e.g., `claude_desktop_config.json`):
         "TASTYTRADE_ACCOUNT_ID": "your_account_id"
       }
     }
-  },
-  "capabilities": {
-    "sampling": {}
   }
 }
 ```
-
-*Note: The `sampling` capability enables AI-powered trade analysis features. Currently supported in VS Code, not yet in Claude Desktop.*
 
 ## Examples
 
@@ -106,8 +93,6 @@ Add to your MCP client configuration (e.g., `claude_desktop_config.json`):
 "Get my private watchlists"
 "Add TSLA and NVDA to my tech watchlist"
 "Remove AAPL from my tech watchlist"
-"Generate trade ideas for my portfolio"
-"Generate aggressive trade ideas for AAPL and TSLA"
 ```
 
 ## Background Trading Bot
