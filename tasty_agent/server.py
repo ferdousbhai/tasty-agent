@@ -1,34 +1,71 @@
 import asyncio
-from contextlib import asynccontextmanager
-from dataclasses import dataclass
-from datetime import timedelta, datetime, date, timezone
-from decimal import Decimal
 import logging
 import os
-from typing import Literal, AsyncIterator, Any, Sequence, TypedDict
-from pydantic import BaseModel, Field
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
+from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
+from typing import Any, Literal
 
-from aiocache import cached, Cache
+import humanize
+from aiocache import Cache, cached
 from aiocache.serializers import PickleSerializer
 from aiolimiter import AsyncLimiter
-import humanize
-from mcp.server.fastmcp import FastMCP, Context
+from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.fastmcp.prompts import base
+from pydantic import BaseModel, Field
 from tabulate import tabulate
-from tastytrade import Session, Account
-from tastytrade.dxfeed import Quote, Greeks
+from tastytrade import Account, Session
+from tastytrade.dxfeed import Greeks, Quote
 from tastytrade.instruments import Equity, Option, a_get_option_chain
-from tastytrade.market_sessions import a_get_market_sessions, a_get_market_holidays, ExchangeType, MarketStatus
+from tastytrade.market_sessions import ExchangeType, MarketStatus, a_get_market_holidays, a_get_market_sessions
 from tastytrade.metrics import a_get_market_metrics
-from tastytrade.order import NewOrder, OrderAction, OrderTimeInForce, OrderType, InstrumentType
+from tastytrade.order import InstrumentType, NewOrder, OrderAction, OrderTimeInForce, OrderType
 from tastytrade.search import a_symbol_search
 from tastytrade.streamer import DXLinkStreamer
 from tastytrade.utils import now_in_new_york
-from tastytrade.watchlists import PublicWatchlist, PrivateWatchlist
+from tastytrade.watchlists import PrivateWatchlist, PublicWatchlist
 
 logger = logging.getLogger(__name__)
 
 rate_limiter = AsyncLimiter(2, 1) # 2 requests per second
+
+
+async def _stream_events(
+    session: Session,
+    event_type: type[Quote] | type[Greeks],
+    streamer_symbols: list[str],
+    timeout: float
+) -> list[Any]:
+    """Generic streaming helper for Quote/Greeks events."""
+    async with DXLinkStreamer(session) as streamer:
+        await streamer.subscribe(event_type, streamer_symbols)
+        events_by_symbol: dict[str, Any] = {}
+        expected = set(streamer_symbols)
+        while len(events_by_symbol) < len(expected):
+            event = await asyncio.wait_for(streamer.get_event(event_type), timeout=timeout)
+            if event.event_symbol in expected:
+                events_by_symbol[event.event_symbol] = event
+        return [events_by_symbol[s] for s in streamer_symbols]
+
+
+async def _paginate[T](
+    fetch_fn: Callable[[int], Awaitable[list[T]]],
+    page_size: int
+) -> list[T]:
+    """Generic pagination helper for API calls."""
+    all_items: list[T] = []
+    offset = 0
+    while True:
+        async with rate_limiter:
+            items = await fetch_fn(offset)
+        all_items.extend(items or [])
+        if not items or len(items) < page_size:
+            break
+        offset += page_size
+    return all_items
+
 
 def to_table(data: Sequence[BaseModel]) -> str:
     """Format list of Pydantic models as a plain table."""
@@ -141,7 +178,9 @@ async def get_net_liquidating_value_history(
 # MARKET DATA TOOLS
 # =============================================================================
 
-class InstrumentDetail(TypedDict):
+@dataclass
+class InstrumentDetail:
+    """Details for a resolved instrument."""
     streamer_symbol: str
     instrument: Equity | Option
 
@@ -174,22 +213,27 @@ def validate_date_format(date_string: str) -> date:
     """Validate date format and return date object."""
     try:
         return datetime.strptime(date_string, "%Y-%m-%d").date()
-    except ValueError:
-        raise ValueError(f"Invalid date format '{date_string}'. Expected YYYY-MM-DD format.")
+    except ValueError as e:
+        raise ValueError(f"Invalid date format '{date_string}'. Expected YYYY-MM-DD format.") from e
 
 
 def validate_strike_price(strike_price: Any) -> float:
     """Validate and convert strike price to float."""
     try:
         strike = float(strike_price)
-        if strike <= 0:
-            raise ValueError("Strike price must be positive")
-        return strike
-    except (ValueError, TypeError):
-        raise ValueError(f"Invalid strike price '{strike_price}'. Expected positive number.")
+    except (ValueError, TypeError) as e:
+        raise ValueError(f"Invalid strike price '{strike_price}'. Expected positive number.") from e
+    if strike <= 0:
+        raise ValueError(f"Invalid strike price '{strike_price}'. Must be positive.")
+    return strike
 
 
-@cached(ttl=86400, cache=Cache.MEMORY, serializer=PickleSerializer())  # 24 hours
+def _option_chain_key_builder(fn, session: Session, symbol: str):
+    """Build cache key using only symbol (session changes but symbol is stable)."""
+    return f"option_chain:{symbol}"
+
+
+@cached(ttl=86400, cache=Cache.MEMORY, serializer=PickleSerializer(), key_builder=_option_chain_key_builder)
 async def get_cached_option_chain(session: Session, symbol: str):
     """Cache option chains for 24 hours as they rarely change during that timeframe."""
     return await a_get_option_chain(session, symbol)
@@ -222,20 +266,14 @@ async def get_instrument_details(session: Session, instrument_specs: list[Instru
             for option in chain[target_date]:
                 if (option.strike_price == strike_price and
                     option.option_type.value == option_type):
-                    return InstrumentDetail(
-                        streamer_symbol=option.streamer_symbol,
-                        instrument=option
-                    )
+                    return InstrumentDetail(option.streamer_symbol, option)
 
             available_strikes = [opt.strike_price for opt in chain[target_date] if opt.option_type.value == option_type]
             raise ValueError(f"Option not found: {symbol} {expiration_date} {option_type} {strike_price}. Available strikes: {sorted(set(available_strikes))}")
         else:
             # Get equity instrument
             instrument = await Equity.a_get(session, symbol)
-            return InstrumentDetail(
-                streamer_symbol=symbol,
-                instrument=instrument
-            )
+            return InstrumentDetail(symbol, instrument)
 
     return await asyncio.gather(*[lookup_single_instrument(spec) for spec in instrument_specs])
 
@@ -274,27 +312,14 @@ async def get_quotes(
     instrument_details = await get_instrument_details(session, instruments)
 
     try:
-        async with DXLinkStreamer(session) as streamer:
-            await streamer.subscribe(Quote, [d["streamer_symbol"] for d in instrument_details])
-
-            # Collect quotes by symbol (handle out-of-order arrivals)
-            quotes_by_symbol = {}
-            expected_symbols = {d["streamer_symbol"] for d in instrument_details}
-            while len(quotes_by_symbol) < len(instrument_details):
-                quote = await asyncio.wait_for(streamer.get_event(Quote), timeout=timeout)
-                if quote.event_symbol in expected_symbols:
-                    quotes_by_symbol[quote.event_symbol] = quote
-
-            # Return quotes in same order as input instruments
-            return to_table([quotes_by_symbol[d["streamer_symbol"]]
-                            for d in instrument_details])
-
-    except asyncio.TimeoutError:
+        quotes = await _stream_events(session, Quote, [d.streamer_symbol for d in instrument_details], timeout)
+        return to_table(quotes)
+    except TimeoutError as e:
         logger.warning(f"Timeout getting quotes for {len(instruments)} instruments after {timeout}s")
-        raise ValueError(f"Timeout getting quotes after {timeout}s")
+        raise ValueError(f"Timeout getting quotes after {timeout}s") from e
     except Exception as e:
-        logger.error(f"Error getting quotes for instruments {[i.symbol for i in instruments]}: {str(e)}")
-        raise ValueError(f"Error getting quotes: {str(e)}")
+        logger.error(f"Error getting quotes for instruments {[i.symbol for i in instruments]}: {e}")
+        raise ValueError(f"Error getting quotes: {e}") from e
 
 
 @mcp_app.tool()
@@ -329,27 +354,14 @@ async def get_greeks(
     option_details = await get_instrument_details(session, options)
 
     try:
-        async with DXLinkStreamer(session) as streamer:
-            await streamer.subscribe(Greeks, [d["streamer_symbol"] for d in option_details])
-
-            # Collect Greeks by symbol
-            greeks_by_symbol = {}
-            expected_symbols = {d["streamer_symbol"] for d in option_details}
-            while len(greeks_by_symbol) < len(option_details):
-                greeks = await asyncio.wait_for(streamer.get_event(Greeks), timeout=timeout)
-                if greeks.event_symbol in expected_symbols:
-                    greeks_by_symbol[greeks.event_symbol] = greeks
-
-            # Return Greeks in same order as input options
-            return to_table([greeks_by_symbol[d["streamer_symbol"]]
-                            for d in option_details])
-
-    except asyncio.TimeoutError:
+        greeks = await _stream_events(session, Greeks, [d.streamer_symbol for d in option_details], timeout)
+        return to_table(greeks)
+    except TimeoutError as e:
         logger.warning(f"Timeout getting Greeks for {len(options)} options after {timeout}s")
-        raise ValueError(f"Timeout getting Greeks after {timeout}s")
+        raise ValueError(f"Timeout getting Greeks after {timeout}s") from e
     except Exception as e:
-        logger.error(f"Error getting Greeks for options {[opt.symbol for opt in options]}: {str(e)}")
-        raise ValueError(f"Error getting Greeks: {str(e)}")
+        logger.error(f"Error getting Greeks for options {[opt.symbol for opt in options]}: {e}")
+        raise ValueError(f"Error getting Greeks: {e}") from e
 
 
 # =============================================================================
@@ -366,29 +378,16 @@ async def get_transaction_history(
     """Get account transaction history including trades and money movements for the last N days (default: 90)."""
     context = get_context(ctx)
     session = get_valid_session(ctx)
-    all_trades = []
-    page_offset = 0
-    PER_PAGE = 250
+    start = date.today() - timedelta(days=days)
 
-    while True:
-        async with rate_limiter:
-            trades = await context.account.a_get_history(
-                session,
-                start_date=date.today() - timedelta(days=days),
-                underlying_symbol=underlying_symbol,
-                type=transaction_type,
-                per_page=PER_PAGE,
-                page_offset=page_offset
-            )
-
-        if not trades or len(trades) < PER_PAGE:
-            all_trades.extend(trades or [])
-            break
-
-        all_trades.extend(trades)
-        page_offset += PER_PAGE
-
-    return to_table(all_trades)
+    trades = await _paginate(
+        lambda offset: context.account.a_get_history(
+            session, start_date=start, underlying_symbol=underlying_symbol,
+            type=transaction_type, per_page=250, page_offset=offset
+        ),
+        page_size=250
+    )
+    return to_table(trades)
 
 
 @mcp_app.tool()
@@ -400,28 +399,16 @@ async def get_order_history(
     """Get all order history for the last N days (default: 7)."""
     context = get_context(ctx)
     session = get_valid_session(ctx)
-    all_orders = []
-    page_offset = 0
-    ORDER_PAGE_SIZE = 50  # Order history API max is 50 per page
+    start = date.today() - timedelta(days=days)
 
-    while True:
-        async with rate_limiter:
-            orders = await context.account.a_get_order_history(
-                session,
-                start_date=date.today() - timedelta(days=days),
-                underlying_symbol=underlying_symbol,
-                per_page=ORDER_PAGE_SIZE,
-                page_offset=page_offset
-            )
-
-        if not orders or len(orders) < ORDER_PAGE_SIZE:
-            all_orders.extend(orders or [])
-            break
-
-        all_orders.extend(orders)
-        page_offset += ORDER_PAGE_SIZE
-
-    return to_table(all_orders)
+    orders = await _paginate(
+        lambda offset: context.account.a_get_order_history(
+            session, start_date=start, underlying_symbol=underlying_symbol,
+            per_page=50, page_offset=offset
+        ),
+        page_size=50  # Order history API max is 50 per page
+    )
+    return to_table(orders)
 
 
 @mcp_app.tool()
@@ -437,12 +424,28 @@ async def get_market_metrics(ctx: Context, symbols: list[str]) -> str:
     return to_table(metrics)
 
 
+def _get_next_open_time(session, current_time: datetime) -> datetime | None:
+    """Determine next market open time based on current status."""
+    if session.status == MarketStatus.PRE_MARKET:
+        return session.open_at
+    if session.status == MarketStatus.CLOSED:
+        if session.open_at and current_time < session.open_at:
+            return session.open_at
+        if session.close_at and current_time > session.close_at and session.next_session:
+            return session.next_session.open_at
+    if session.status == MarketStatus.EXTENDED and session.next_session:
+        return session.next_session.open_at
+    return None
+
+
 @mcp_app.tool()
-async def market_status(ctx: Context, exchanges: list[Literal['Equity', 'CME', 'CFE', 'Smalls']] = ['Equity']):
+async def market_status(ctx: Context, exchanges: list[Literal['Equity', 'CME', 'CFE', 'Smalls']] | None = None):
     """
     Get market status for each exchange including current open/closed state,
     next opening times, and holiday information.
     """
+    if exchanges is None:
+        exchanges = ['Equity']
     session = get_valid_session(ctx)
     market_sessions = await a_get_market_sessions(session, [ExchangeType(exchange) for exchange in exchanges])
 
@@ -450,35 +453,28 @@ async def market_status(ctx: Context, exchanges: list[Literal['Equity', 'CME', '
         logger.error(f"No market sessions found for exchanges: {exchanges}")
         raise ValueError("No market sessions found")
 
-    current_time = datetime.now(timezone.utc)
+    current_time = datetime.now(UTC)
     calendar = await a_get_market_holidays(session)
     is_holiday = current_time.date() in calendar.holidays
     is_half_day = current_time.date() in calendar.half_days
 
-    results = []
-    for market_session in market_sessions:
-        if market_session.status == MarketStatus.OPEN:
-            result = {
-                "exchange": market_session.instrument_collection,
-                "status": market_session.status.value,
-                "close_at": market_session.close_at.isoformat() if market_session.close_at else None,
-            }
-        else:
-            open_at = (
-                market_session.open_at if market_session.status == MarketStatus.PRE_MARKET and market_session.open_at else
-                market_session.open_at if market_session.status == MarketStatus.CLOSED and market_session.open_at and current_time < market_session.open_at else
-                market_session.next_session.open_at if market_session.status == MarketStatus.CLOSED and market_session.close_at and current_time > market_session.close_at and market_session.next_session and market_session.next_session.open_at else
-                market_session.next_session.open_at if market_session.status == MarketStatus.EXTENDED and market_session.next_session and market_session.next_session.open_at else
-                None
-            )
+    results: list[dict[str, Any]] = []
+    for ms in market_sessions:
+        result: dict[str, Any] = {"exchange": ms.instrument_collection, "status": ms.status.value}
 
-            result = {
-                "exchange": market_session.instrument_collection,
-                "status": market_session.status.value,
-                **({"next_open": open_at.isoformat(), "time_until_open": humanize.naturaldelta(open_at - current_time)} if open_at else {}),
-                **({"is_holiday": True} if is_holiday else {}),
-                **({"is_half_day": True} if is_half_day else {})
-            }
+        if ms.status == MarketStatus.OPEN:
+            if ms.close_at:
+                result["close_at"] = ms.close_at.isoformat()
+        else:
+            open_at = _get_next_open_time(ms, current_time)
+            if open_at:
+                result["next_open"] = open_at.isoformat()
+                result["time_until_open"] = humanize.naturaldelta(open_at - current_time)
+            if is_holiday:
+                result["is_holiday"] = True
+            if is_half_day:
+                result["is_half_day"] = True
+
         results.append(result)
     return results
 
@@ -498,61 +494,43 @@ async def search_symbols(ctx: Context, symbol: str) -> str:
 
 def build_order_legs(instrument_details: list[InstrumentDetail], legs: list[OrderLeg]) -> list:
     """Build order legs from instrument details and leg specifications."""
+    if len(instrument_details) != len(legs):
+        raise ValueError(f"Mismatched legs: {len(instrument_details)} instruments vs {len(legs)} leg specs")
+
     built_legs = []
-    for detail, leg_spec in zip(instrument_details, legs):
-        action = leg_spec.action
-        quantity = leg_spec.quantity
-        instrument = detail['instrument']
-
-        # Determine order action based on instrument type
-        if isinstance(instrument, Option):
-            order_action = OrderAction(action)
-        else:
-            order_action = OrderAction.BUY if action == 'Buy' else OrderAction.SELL
-
-        built_legs.append(instrument.build_leg(Decimal(str(quantity)), order_action))
+    for detail, leg_spec in zip(instrument_details, legs, strict=True):
+        instrument = detail.instrument
+        order_action = (
+            OrderAction(leg_spec.action) if isinstance(instrument, Option)
+            else OrderAction.BUY if leg_spec.action == 'Buy' else OrderAction.SELL
+        )
+        built_legs.append(instrument.build_leg(Decimal(str(leg_spec.quantity)), order_action))
     return built_legs
+
+
+async def _fetch_quotes_raw(session: Session, instrument_details: list[InstrumentDetail], timeout: float = 10.0) -> list[Any]:
+    """Fetch raw Quote objects for price calculations (internal use)."""
+    return await _stream_events(session, Quote, [d.streamer_symbol for d in instrument_details], timeout)
 
 
 async def calculate_net_price(ctx: Context, instrument_details: list[InstrumentDetail], legs: list[OrderLeg]) -> float:
     """Calculate net price from current market quotes."""
-    # Convert instrument_details format for get_quotes
-    instruments = []
-    for detail in instrument_details:
-        instrument_obj = detail['instrument']
-        if isinstance(instrument_obj, Option):
-            instrument = InstrumentSpec(
-                symbol=instrument_obj.underlying_symbol,
-                option_type=instrument_obj.option_type.value,
-                strike_price=float(instrument_obj.strike_price),
-                expiration_date=instrument_obj.expiration_date.strftime("%Y-%m-%d")
-            )
-        else:
-            instrument = InstrumentSpec(
-                symbol=instrument_obj.symbol,
-                option_type=None,
-                strike_price=None,
-                expiration_date=None
-            )
-        instruments.append(instrument)
+    session = get_valid_session(ctx)
+    quotes = await _fetch_quotes_raw(session, instrument_details)
 
-    # Get quotes using existing tool
-    quotes_data = await get_quotes(ctx, instruments)
-
-    # Calculate net price
     net_price = 0.0
-    for quote_data, leg_spec in zip(quotes_data, legs):
-        if quote_data.get("bid_price") and quote_data.get("ask_price"):
-            mid_price = (quote_data["bid_price"] + quote_data["ask_price"]) / 2
-            leg_price = -mid_price if leg_spec.action.startswith('Buy') else mid_price
-            net_price += leg_price * leg_spec.quantity
+    for quote, detail, leg in zip(quotes, instrument_details, legs, strict=True):
+        if quote.bid_price is not None and quote.ask_price is not None:
+            mid_price = float(quote.bid_price + quote.ask_price) / 2
+            leg_price = -mid_price if leg.action.startswith('Buy') else mid_price
+            net_price += leg_price * leg.quantity
         else:
-            instrument_obj = instrument_details[quotes_data.index(quote_data)]['instrument']
-            if isinstance(instrument_obj, Option):
-                symbol_info = f"{instrument_obj.underlying_symbol} {instrument_obj.option_type.value}{instrument_obj.strike_price} {instrument_obj.expiration_date}"
-            else:
-                symbol_info = instrument_obj.symbol
-            logger.warning(f"Could not get bid/ask prices for {symbol_info} - quote data: {quote_data}")
+            inst = detail.instrument
+            symbol_info = (
+                f"{inst.underlying_symbol} {inst.option_type.value}{inst.strike_price} {inst.expiration_date}"
+                if isinstance(inst, Option) else inst.symbol
+            )
+            logger.warning(f"Could not get bid/ask prices for {symbol_info}")
             raise ValueError(f"Could not get bid/ask for {symbol_info}")
 
     return round(net_price * 100) / 100
@@ -628,8 +606,8 @@ async def place_order(
                 await ctx.info(f"💰 Auto-calculated net mid-price: ${price:.2f}")
                 logger.info(f"Auto-calculated price ${price:.2f} for {len(legs)}-leg order")
             except Exception as e:
-                logger.warning(f"Failed to auto-calculate price for order legs {[leg.symbol for leg in legs]}: {str(e)}")
-                raise ValueError(f"Could not fetch quotes for price calculation: {str(e)}. Please provide a price.")
+                logger.warning(f"Failed to auto-calculate price for order legs {[leg.symbol for leg in legs]}: {e!s}")
+                raise ValueError(f"Could not fetch quotes for price calculation: {e!s}. Please provide a price.") from e
 
         return (await context.account.a_place_order(
             session,
@@ -706,16 +684,19 @@ async def get_watchlists(
     ctx: Context,
     watchlist_type: Literal['public', 'private'] = 'private',
     name: str | None = None
-) -> list[dict[str, Any]] | dict[str, Any]:
+) -> list[dict[str, Any]]:
     """
     Get watchlists for market insights and tracking.
 
-    No name = list watchlist names. With name = get symbols in that watchlist. For private, default to "main".
+    No name = list all watchlist names. With name = get that specific watchlist (wrapped in list).
+    For private watchlists, "main" is the default.
     """
     session = get_valid_session(ctx)
     watchlist_class = PublicWatchlist if watchlist_type == 'public' else PrivateWatchlist
 
-    return (await watchlist_class.a_get(session, name)).model_dump() if name else [w.model_dump() for w in await watchlist_class.a_get(session)]
+    if name:
+        return [(await watchlist_class.a_get(session, name)).model_dump()]
+    return [w.model_dump() for w in await watchlist_class.a_get(session)]
 
 
 @mcp_app.tool()

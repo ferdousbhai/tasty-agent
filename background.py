@@ -5,11 +5,10 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import typer
+from tastytrade.market_sessions import ExchangeType, MarketStatus, a_get_market_sessions
 from tastytrade.session import Session
-from tastytrade.market_sessions import a_get_market_sessions, ExchangeType, MarketStatus
 
-from agent import create_tastytrader_agent # loads .env internally
-
+from agent import create_tastytrader_agent  # loads .env internally
 
 logging.basicConfig(
     level=logging.INFO,
@@ -21,20 +20,17 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def create_tastytrade_session() -> Session:
-    """Create and return a configured TastyTrade session."""
-    client_secret = os.getenv("TASTYTRADE_CLIENT_SECRET")
-    refresh_token = os.getenv("TASTYTRADE_REFRESH_TOKEN")
-    if not client_secret or not refresh_token:
-        raise ValueError("Missing required TastyTrade environment variables")
-    return Session(client_secret, refresh_token)
-
-
-def check_market_open() -> bool:
+async def check_market_open() -> bool:
+    """Check if NYSE market is currently open (async)."""
     try:
-        session = create_tastytrade_session()
-        market_sessions = asyncio.run(a_get_market_sessions(session, [ExchangeType.NYSE]))
-        return any(market_session.status == MarketStatus.OPEN for market_session in market_sessions)
+        client_secret = os.getenv("TASTYTRADE_CLIENT_SECRET")
+        refresh_token = os.getenv("TASTYTRADE_REFRESH_TOKEN")
+        if not client_secret or not refresh_token:
+            logger.warning("Missing TastyTrade credentials for market check. Proceeding with agent run.")
+            return True
+        session = Session(client_secret, refresh_token)
+        market_sessions = await a_get_market_sessions(session, [ExchangeType.NYSE])
+        return any(ms.status == MarketStatus.OPEN for ms in market_sessions)
     except Exception as e:
         logger.warning(f"Failed to check market status: {e}. Proceeding with agent run.")
         return True
@@ -51,7 +47,7 @@ async def run_background_agent(instructions: str, period: int | None = None, sch
             last_result = None
             try:
                 while True:
-                    if market_open_only and not check_market_open():
+                    if market_open_only and not await check_market_open():
                         logger.info("Markets are closed, skipping agent run.")
                     else:
                         logger.info("Running agent...")
@@ -63,7 +59,7 @@ async def run_background_agent(instructions: str, period: int | None = None, sch
             if last_result:
                 print(f"🤖 {last_result}")
         else:
-            if market_open_only and not check_market_open():
+            if market_open_only and not await check_market_open():
                 logger.info("Markets are closed, skipping agent run.")
                 return
             logger.info("Running agent...")
