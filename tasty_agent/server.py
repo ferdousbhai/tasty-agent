@@ -46,6 +46,25 @@ def get_context(ctx: Context) -> ServerContext:
     """Extract context from request."""
     return ctx.request_context.lifespan_context
 
+
+def get_valid_session(ctx: Context) -> Session:
+    """Get a valid session, refreshing if expired or about to expire.
+
+    TastyTrade sessions expire after 15 minutes. This function checks the
+    expiration time and refreshes proactively if within 5 seconds of expiry.
+    """
+    context = get_context(ctx)
+    session = context.session
+
+    # Refresh if expired or expiring within 5 seconds (buffer for network latency)
+    time_until_expiry = (session.session_expiration - now_in_new_york()).total_seconds()
+    if time_until_expiry < 5:
+        logger.info(f"Session expiring in {time_until_expiry:.0f}s, refreshing...")
+        session.refresh()
+        logger.info(f"Session refreshed, new expiration: {session.session_expiration}")
+
+    return session
+
 @asynccontextmanager
 async def lifespan(_) -> AsyncIterator[ServerContext]:
     """Manages Tastytrade session lifecycle."""
@@ -93,13 +112,15 @@ mcp_app = FastMCP("TastyTrade", lifespan=lifespan)
 @mcp_app.tool()
 async def get_balances(ctx: Context) -> dict[str, Any]:
     context = get_context(ctx)
-    return {k: v for k, v in (await context.account.a_get_balances(context.session)).model_dump().items() if v is not None and v != 0}
+    session = get_valid_session(ctx)
+    return {k: v for k, v in (await context.account.a_get_balances(session)).model_dump().items() if v is not None and v != 0}
 
 
 @mcp_app.tool()
 async def get_positions(ctx: Context) -> str:
     context = get_context(ctx)
-    positions = await context.account.a_get_positions(context.session, include_marks=True)
+    session = get_valid_session(ctx)
+    positions = await context.account.a_get_positions(session, include_marks=True)
     return to_table(positions)
 
 
@@ -110,7 +131,8 @@ async def get_net_liquidating_value_history(
 ) -> str:
     """Portfolio value over time. ⚠️ Use with get_transaction_history(transaction_type="Money Movement") to separate trading performance from deposits/withdrawals."""
     context = get_context(ctx)
-    history = await context.account.a_get_net_liquidating_value_history(context.session, time_back=time_back)
+    session = get_valid_session(ctx)
+    history = await context.account.a_get_net_liquidating_value_history(session, time_back=time_back)
     return to_table(history)
 
 
@@ -248,11 +270,11 @@ async def get_quotes(
         logger.error("get_quotes called with empty instruments list")
         raise ValueError("At least one instrument is required")
 
-    context = get_context(ctx)
-    instrument_details = await get_instrument_details(context.session, instruments)
+    session = get_valid_session(ctx)
+    instrument_details = await get_instrument_details(session, instruments)
 
     try:
-        async with DXLinkStreamer(context.session) as streamer:
+        async with DXLinkStreamer(session) as streamer:
             await streamer.subscribe(Quote, [d["streamer_symbol"] for d in instrument_details])
 
             # Collect quotes by symbol (handle out-of-order arrivals)
@@ -303,11 +325,11 @@ async def get_greeks(
         logger.error("get_greeks called with empty options list")
         raise ValueError("At least one option is required")
 
-    context = get_context(ctx)
-    option_details = await get_instrument_details(context.session, options)
+    session = get_valid_session(ctx)
+    option_details = await get_instrument_details(session, options)
 
     try:
-        async with DXLinkStreamer(context.session) as streamer:
+        async with DXLinkStreamer(session) as streamer:
             await streamer.subscribe(Greeks, [d["streamer_symbol"] for d in option_details])
 
             # Collect Greeks by symbol
@@ -343,6 +365,7 @@ async def get_transaction_history(
 ) -> str:
     """Get account transaction history including trades and money movements for the last N days (default: 90)."""
     context = get_context(ctx)
+    session = get_valid_session(ctx)
     all_trades = []
     page_offset = 0
     PER_PAGE = 250
@@ -350,7 +373,7 @@ async def get_transaction_history(
     while True:
         async with rate_limiter:
             trades = await context.account.a_get_history(
-                context.session,
+                session,
                 start_date=date.today() - timedelta(days=days),
                 underlying_symbol=underlying_symbol,
                 type=transaction_type,
@@ -376,6 +399,7 @@ async def get_order_history(
 ) -> str:
     """Get all order history for the last N days (default: 7)."""
     context = get_context(ctx)
+    session = get_valid_session(ctx)
     all_orders = []
     page_offset = 0
     ORDER_PAGE_SIZE = 50  # Order history API max is 50 per page
@@ -383,7 +407,7 @@ async def get_order_history(
     while True:
         async with rate_limiter:
             orders = await context.account.a_get_order_history(
-                context.session,
+                session,
                 start_date=date.today() - timedelta(days=days),
                 underlying_symbol=underlying_symbol,
                 per_page=ORDER_PAGE_SIZE,
@@ -408,7 +432,8 @@ async def get_market_metrics(ctx: Context, symbols: list[str]) -> str:
 
     Note extreme IV rank/percentile (0-1): low = cheap options (buy opportunity), high = expensive options (close positions).
     """
-    metrics = await a_get_market_metrics(get_context(ctx).session, symbols)
+    session = get_valid_session(ctx)
+    metrics = await a_get_market_metrics(session, symbols)
     return to_table(metrics)
 
 
@@ -418,15 +443,15 @@ async def market_status(ctx: Context, exchanges: list[Literal['Equity', 'CME', '
     Get market status for each exchange including current open/closed state,
     next opening times, and holiday information.
     """
-    context = get_context(ctx)
-    market_sessions = await a_get_market_sessions(context.session, [ExchangeType(exchange) for exchange in exchanges])
+    session = get_valid_session(ctx)
+    market_sessions = await a_get_market_sessions(session, [ExchangeType(exchange) for exchange in exchanges])
 
     if not market_sessions:
         logger.error(f"No market sessions found for exchanges: {exchanges}")
         raise ValueError("No market sessions found")
 
     current_time = datetime.now(timezone.utc)
-    calendar = await a_get_market_holidays(context.session)
+    calendar = await a_get_market_holidays(session)
     is_holiday = current_time.date() in calendar.holidays
     is_half_day = current_time.date() in calendar.half_days
 
@@ -461,8 +486,9 @@ async def market_status(ctx: Context, exchanges: list[Literal['Equity', 'CME', '
 @mcp_app.tool()
 async def search_symbols(ctx: Context, symbol: str) -> str:
     """Search for symbols similar to the given search phrase."""
+    session = get_valid_session(ctx)
     async with rate_limiter:
-        results = await a_symbol_search(get_context(ctx).session, symbol)
+        results = await a_symbol_search(session, symbol)
     return to_table(results)
 
 
@@ -535,7 +561,8 @@ async def calculate_net_price(ctx: Context, instrument_details: list[InstrumentD
 @mcp_app.tool()
 async def get_live_orders(ctx: Context) -> str:
     context = get_context(ctx)
-    orders = await context.account.a_get_live_orders(context.session)
+    session = get_valid_session(ctx)
+    orders = await context.account.a_get_live_orders(session)
     return to_table(orders)
 
 
@@ -581,6 +608,7 @@ async def place_order(
             raise ValueError("At least one leg is required")
 
         context = get_context(ctx)
+        session = get_valid_session(ctx)
         # Convert OrderLeg to InstrumentSpec for instrument lookup
         instrument_specs = [
             InstrumentSpec(
@@ -591,7 +619,7 @@ async def place_order(
             )
             for leg in legs
         ]
-        instrument_details = await get_instrument_details(context.session, instrument_specs)
+        instrument_details = await get_instrument_details(session, instrument_specs)
 
         # Calculate price if not provided
         if price is None:
@@ -604,7 +632,7 @@ async def place_order(
                 raise ValueError(f"Could not fetch quotes for price calculation: {str(e)}. Please provide a price.")
 
         return (await context.account.a_place_order(
-            context.session,
+            session,
             NewOrder(
                 time_in_force=OrderTimeInForce(time_in_force),
                 order_type=OrderType.LIMIT,
@@ -636,9 +664,10 @@ async def replace_order(
     """
     async with rate_limiter:
         context = get_context(ctx)
+        session = get_valid_session(ctx)
 
         # Get the existing order
-        live_orders = await context.account.a_get_live_orders(context.session)
+        live_orders = await context.account.a_get_live_orders(session)
         existing_order = next((order for order in live_orders if str(order.id) == order_id), None)
 
         if not existing_order:
@@ -648,7 +677,7 @@ async def replace_order(
 
         # Replace order with modified price
         return (await context.account.a_replace_order(
-            context.session,
+            session,
             int(order_id),
             NewOrder(
                 time_in_force=existing_order.time_in_force,
@@ -663,7 +692,8 @@ async def replace_order(
 async def delete_order(ctx: Context, order_id: str) -> dict[str, Any]:
     """Cancel an existing order."""
     context = get_context(ctx)
-    await context.account.a_delete_order(context.session, int(order_id))
+    session = get_valid_session(ctx)
+    await context.account.a_delete_order(session, int(order_id))
     return {"success": True, "order_id": order_id}
 
 
@@ -682,10 +712,10 @@ async def get_watchlists(
 
     No name = list watchlist names. With name = get symbols in that watchlist. For private, default to "main".
     """
-    context = get_context(ctx)
+    session = get_valid_session(ctx)
     watchlist_class = PublicWatchlist if watchlist_type == 'public' else PrivateWatchlist
 
-    return (await watchlist_class.a_get(context.session, name)).model_dump() if name else [w.model_dump() for w in await watchlist_class.a_get(context.session)]
+    return (await watchlist_class.a_get(session, name)).model_dump() if name else [w.model_dump() for w in await watchlist_class.a_get(session)]
 
 
 @mcp_app.tool()
@@ -715,7 +745,7 @@ async def manage_private_watchlist(
             {"symbol": "SPY", "instrument_type": "Equity Option"}
         ])
     """
-    context = get_context(ctx)
+    session = get_valid_session(ctx)
 
     if not symbols:
         logger.error("manage_private_watchlist called with empty symbols list")
@@ -723,12 +753,12 @@ async def manage_private_watchlist(
 
     if action == "add":
         try:
-            watchlist = await PrivateWatchlist.a_get(context.session, name)
+            watchlist = await PrivateWatchlist.a_get(session, name)
             for symbol_spec in symbols:
                 symbol = symbol_spec.symbol
                 instrument_type = InstrumentType(symbol_spec.instrument_type)
                 watchlist.add_symbol(symbol, instrument_type)
-            await watchlist.a_update(context.session)
+            await watchlist.a_update(session)
             logger.info(f"Added {len(symbols)} symbols to existing watchlist '{name}'")
 
             symbol_list = [f"{s.symbol} ({s.instrument_type})" for s in symbols]
@@ -741,18 +771,18 @@ async def manage_private_watchlist(
                 group_name="main",
                 watchlist_entries=watchlist_entries
             )
-            await watchlist.a_upload(context.session)
+            await watchlist.a_upload(session)
             logger.info(f"Created new watchlist '{name}' with {len(symbols)} symbols")
             symbol_list = [f"{s.symbol} ({s.instrument_type})" for s in symbols]
             await ctx.info(f"✅ Created watchlist '{name}' and added {len(symbols)} symbols: {', '.join(symbol_list)}")
     else:
         try:
-            watchlist = await PrivateWatchlist.a_get(context.session, name)
+            watchlist = await PrivateWatchlist.a_get(session, name)
             for symbol_spec in symbols:
                 symbol = symbol_spec.symbol
                 instrument_type = InstrumentType(symbol_spec.instrument_type)
                 watchlist.remove_symbol(symbol, instrument_type)
-            await watchlist.a_update(context.session)
+            await watchlist.a_update(session)
             logger.info(f"Removed {len(symbols)} symbols from watchlist '{name}'")
 
             symbol_list = [f"{s.symbol} ({s.instrument_type})" for s in symbols]
@@ -764,8 +794,8 @@ async def manage_private_watchlist(
 
 @mcp_app.tool()
 async def delete_private_watchlist(ctx: Context, name: str) -> None:
-    context = get_context(ctx)
-    await PrivateWatchlist.a_remove(context.session, name)
+    session = get_valid_session(ctx)
+    await PrivateWatchlist.a_remove(session, name)
     await ctx.info(f"✅ Deleted private watchlist '{name}'")
 
 
