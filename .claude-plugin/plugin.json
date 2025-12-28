@@ -1,0 +1,20 @@
+{
+  "name": "tasty",
+  "version": "3.2.0",
+  "description": "TastyTrade brokerage integration for account management and trading",
+  "author": {
+    "name": "Ferdous",
+    "email": "ferdous@hey.com"
+  },
+  "repository": "https://github.com/ferdousbhai/tasty-agent",
+  "license": "MIT",
+  "keywords": ["tastytrade", "brokerage", "trading", "options"],
+  "commands": "./commands/",
+  "skills": "./skills/",
+  "mcpServers": {
+    "tasty-agent": {
+      "command": "uvx",
+      "args": ["tasty-agent"]
+    }
+  }
+}
