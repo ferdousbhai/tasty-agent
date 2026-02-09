@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import typer
-from tastytrade.market_sessions import ExchangeType, MarketStatus, a_get_market_sessions
+from tastytrade.market_sessions import ExchangeType, MarketStatus, get_market_sessions
 from tastytrade.session import Session
 
 from agent import create_tastytrader_agent  # loads .env internally
@@ -29,7 +29,7 @@ async def check_market_open() -> bool:
             logger.warning("Missing TastyTrade credentials for market check. Proceeding with agent run.")
             return True
         session = Session(client_secret, refresh_token)
-        market_sessions = await a_get_market_sessions(session, [ExchangeType.NYSE])
+        market_sessions = await get_market_sessions(session, [ExchangeType.NYSE])
         return any(ms.status == MarketStatus.OPEN for ms in market_sessions)
     except Exception as e:
         logger.warning(f"Failed to check market status: {e}. Proceeding with agent run.")

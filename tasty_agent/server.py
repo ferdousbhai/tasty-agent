@@ -18,11 +18,11 @@ from pydantic import BaseModel, Field
 from tabulate import tabulate
 from tastytrade import Account, Session
 from tastytrade.dxfeed import Greeks, Quote
-from tastytrade.instruments import Equity, Option, a_get_option_chain
-from tastytrade.market_sessions import ExchangeType, MarketStatus, a_get_market_holidays, a_get_market_sessions
-from tastytrade.metrics import a_get_market_metrics
+from tastytrade.instruments import Equity, Option, get_option_chain
+from tastytrade.market_sessions import ExchangeType, MarketStatus, get_market_holidays, get_market_sessions
+from tastytrade.metrics import get_market_metrics
 from tastytrade.order import InstrumentType, NewOrder, OrderAction, OrderTimeInForce, OrderType
-from tastytrade.search import a_symbol_search
+from tastytrade.search import symbol_search
 from tastytrade.streamer import DXLinkStreamer
 from tastytrade.utils import now_in_new_york
 from tastytrade.watchlists import PrivateWatchlist, PublicWatchlist
@@ -119,7 +119,7 @@ async def lifespan(_) -> AsyncIterator[ServerContext]:
 
     try:
         session = Session(client_secret, refresh_token)
-        accounts = Account.get(session)
+        accounts = await Account.get(session)
         logger.info(f"Successfully authenticated with Tastytrade. Found {len(accounts)} account(s).")
     except Exception as e:
         logger.error(f"Failed to authenticate with Tastytrade: {e}")
@@ -150,14 +150,14 @@ mcp_app = FastMCP("TastyTrade", lifespan=lifespan)
 async def get_balances(ctx: Context) -> dict[str, Any]:
     context = get_context(ctx)
     session = get_valid_session(ctx)
-    return {k: v for k, v in (await context.account.a_get_balances(session)).model_dump().items() if v is not None and v != 0}
+    return {k: v for k, v in (await context.account.get_balances(session)).model_dump().items() if v is not None and v != 0}
 
 
 @mcp_app.tool()
 async def get_positions(ctx: Context) -> str:
     context = get_context(ctx)
     session = get_valid_session(ctx)
-    positions = await context.account.a_get_positions(session, include_marks=True)
+    positions = await context.account.get_positions(session, include_marks=True)
     return to_table(positions)
 
 
@@ -169,7 +169,7 @@ async def get_net_liquidating_value_history(
     """Portfolio value over time. ⚠️ Use with get_transaction_history(transaction_type="Money Movement") to separate trading performance from deposits/withdrawals."""
     context = get_context(ctx)
     session = get_valid_session(ctx)
-    history = await context.account.a_get_net_liquidating_value_history(session, time_back=time_back)
+    history = await context.account.get_net_liquidating_value_history(session, time_back=time_back)
     return to_table(history)
 
 
@@ -236,7 +236,7 @@ def _option_chain_key_builder(fn, session: Session, symbol: str):
 @cached(ttl=86400, cache=Cache.MEMORY, serializer=PickleSerializer(), key_builder=_option_chain_key_builder)
 async def get_cached_option_chain(session: Session, symbol: str):
     """Cache option chains for 24 hours as they rarely change during that timeframe."""
-    return await a_get_option_chain(session, symbol)
+    return await get_option_chain(session, symbol)
 
 
 async def get_instrument_details(session: Session, instrument_specs: list[InstrumentSpec]) -> list[InstrumentDetail]:
@@ -272,7 +272,7 @@ async def get_instrument_details(session: Session, instrument_specs: list[Instru
             raise ValueError(f"Option not found: {symbol} {expiration_date} {option_type} {strike_price}. Available strikes: {sorted(set(available_strikes))}")
         else:
             # Get equity instrument
-            instrument = await Equity.a_get(session, symbol)
+            instrument = await Equity.get(session, symbol)
             return InstrumentDetail(symbol, instrument)
 
     return await asyncio.gather(*[lookup_single_instrument(spec) for spec in instrument_specs])
@@ -381,7 +381,7 @@ async def get_transaction_history(
     start = date.today() - timedelta(days=days)
 
     trades = await _paginate(
-        lambda offset: context.account.a_get_history(
+        lambda offset: context.account.get_history(
             session, start_date=start, underlying_symbol=underlying_symbol,
             type=transaction_type, per_page=250, page_offset=offset
         ),
@@ -402,7 +402,7 @@ async def get_order_history(
     start = date.today() - timedelta(days=days)
 
     orders = await _paginate(
-        lambda offset: context.account.a_get_order_history(
+        lambda offset: context.account.get_order_history(
             session, start_date=start, underlying_symbol=underlying_symbol,
             per_page=50, page_offset=offset
         ),
@@ -420,7 +420,7 @@ async def get_market_metrics(ctx: Context, symbols: list[str]) -> str:
     Note extreme IV rank/percentile (0-1): low = cheap options (buy opportunity), high = expensive options (close positions).
     """
     session = get_valid_session(ctx)
-    metrics = await a_get_market_metrics(session, symbols)
+    metrics = await get_market_metrics(session, symbols)
     return to_table(metrics)
 
 
@@ -447,14 +447,14 @@ async def market_status(ctx: Context, exchanges: list[Literal['Equity', 'CME', '
     if exchanges is None:
         exchanges = ['Equity']
     session = get_valid_session(ctx)
-    market_sessions = await a_get_market_sessions(session, [ExchangeType(exchange) for exchange in exchanges])
+    market_sessions = await get_market_sessions(session, [ExchangeType(exchange) for exchange in exchanges])
 
     if not market_sessions:
         logger.error(f"No market sessions found for exchanges: {exchanges}")
         raise ValueError("No market sessions found")
 
     current_time = datetime.now(UTC)
-    calendar = await a_get_market_holidays(session)
+    calendar = await get_market_holidays(session)
     is_holiday = current_time.date() in calendar.holidays
     is_half_day = current_time.date() in calendar.half_days
 
@@ -484,7 +484,7 @@ async def search_symbols(ctx: Context, symbol: str) -> str:
     """Search for symbols similar to the given search phrase."""
     session = get_valid_session(ctx)
     async with rate_limiter:
-        results = await a_symbol_search(session, symbol)
+        results = await symbol_search(session, symbol)
     return to_table(results)
 
 
@@ -540,7 +540,7 @@ async def calculate_net_price(ctx: Context, instrument_details: list[InstrumentD
 async def get_live_orders(ctx: Context) -> str:
     context = get_context(ctx)
     session = get_valid_session(ctx)
-    orders = await context.account.a_get_live_orders(session)
+    orders = await context.account.get_live_orders(session)
     return to_table(orders)
 
 
@@ -609,7 +609,7 @@ async def place_order(
                 logger.warning(f"Failed to auto-calculate price for order legs {[leg.symbol for leg in legs]}: {e!s}")
                 raise ValueError(f"Could not fetch quotes for price calculation: {e!s}. Please provide a price.") from e
 
-        return (await context.account.a_place_order(
+        return (await context.account.place_order(
             session,
             NewOrder(
                 time_in_force=OrderTimeInForce(time_in_force),
@@ -645,7 +645,7 @@ async def replace_order(
         session = get_valid_session(ctx)
 
         # Get the existing order
-        live_orders = await context.account.a_get_live_orders(session)
+        live_orders = await context.account.get_live_orders(session)
         existing_order = next((order for order in live_orders if str(order.id) == order_id), None)
 
         if not existing_order:
@@ -654,7 +654,7 @@ async def replace_order(
             raise ValueError(f"Order {order_id} not found in live orders")
 
         # Replace order with modified price
-        return (await context.account.a_replace_order(
+        return (await context.account.replace_order(
             session,
             int(order_id),
             NewOrder(
@@ -671,7 +671,7 @@ async def delete_order(ctx: Context, order_id: str) -> dict[str, Any]:
     """Cancel an existing order."""
     context = get_context(ctx)
     session = get_valid_session(ctx)
-    await context.account.a_delete_order(session, int(order_id))
+    await context.account.delete_order(session, int(order_id))
     return {"success": True, "order_id": order_id}
 
 
@@ -695,8 +695,8 @@ async def get_watchlists(
     watchlist_class = PublicWatchlist if watchlist_type == 'public' else PrivateWatchlist
 
     if name:
-        return [(await watchlist_class.a_get(session, name)).model_dump()]
-    return [w.model_dump() for w in await watchlist_class.a_get(session)]
+        return [(await watchlist_class.get(session, name)).model_dump()]
+    return [w.model_dump() for w in await watchlist_class.get(session)]
 
 
 @mcp_app.tool()
@@ -734,12 +734,12 @@ async def manage_private_watchlist(
 
     if action == "add":
         try:
-            watchlist = await PrivateWatchlist.a_get(session, name)
+            watchlist = await PrivateWatchlist.get(session, name)
             for symbol_spec in symbols:
                 symbol = symbol_spec.symbol
                 instrument_type = InstrumentType(symbol_spec.instrument_type)
                 watchlist.add_symbol(symbol, instrument_type)
-            await watchlist.a_update(session)
+            await watchlist.update(session)
             logger.info(f"Added {len(symbols)} symbols to existing watchlist '{name}'")
 
             symbol_list = [f"{s.symbol} ({s.instrument_type})" for s in symbols]
@@ -752,18 +752,18 @@ async def manage_private_watchlist(
                 group_name="main",
                 watchlist_entries=watchlist_entries
             )
-            await watchlist.a_upload(session)
+            await watchlist.upload(session)
             logger.info(f"Created new watchlist '{name}' with {len(symbols)} symbols")
             symbol_list = [f"{s.symbol} ({s.instrument_type})" for s in symbols]
             await ctx.info(f"✅ Created watchlist '{name}' and added {len(symbols)} symbols: {', '.join(symbol_list)}")
     else:
         try:
-            watchlist = await PrivateWatchlist.a_get(session, name)
+            watchlist = await PrivateWatchlist.get(session, name)
             for symbol_spec in symbols:
                 symbol = symbol_spec.symbol
                 instrument_type = InstrumentType(symbol_spec.instrument_type)
                 watchlist.remove_symbol(symbol, instrument_type)
-            await watchlist.a_update(session)
+            await watchlist.update(session)
             logger.info(f"Removed {len(symbols)} symbols from watchlist '{name}'")
 
             symbol_list = [f"{s.symbol} ({s.instrument_type})" for s in symbols]
@@ -776,7 +776,7 @@ async def manage_private_watchlist(
 @mcp_app.tool()
 async def delete_private_watchlist(ctx: Context, name: str) -> None:
     session = get_valid_session(ctx)
-    await PrivateWatchlist.a_remove(session, name)
+    await PrivateWatchlist.remove(session, name)
     await ctx.info(f"✅ Deleted private watchlist '{name}'")
 
 

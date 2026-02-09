@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "mcp[cli]>=v1.14.0",
-    "tastytrade>=11.0.0",
+    "tastytrade>=12.0.0",
     "humanize>=4.12.3",
     "aiolimiter==1.2.1",
     "tabulate>=0.9.0",
@@ -66,3 +66,4 @@ typeCheckingMode = "basic"
 asyncio_mode = "auto"
 testpaths = ["tests"]
 filterwarnings = ["ignore::DeprecationWarning"]
+markers = ["integration: tests that require tastytrade API credentials"]
