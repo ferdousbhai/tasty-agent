@@ -20,7 +20,7 @@ from tastytrade import Account, Session
 from tastytrade.dxfeed import Greeks, Quote
 from tastytrade.instruments import Equity, Option, get_option_chain
 from tastytrade.market_sessions import ExchangeType, MarketStatus, get_market_holidays, get_market_sessions
-from tastytrade.metrics import get_market_metrics
+from tastytrade import metrics
 from tastytrade.order import InstrumentType, NewOrder, OrderAction, OrderTimeInForce, OrderType
 from tastytrade.search import symbol_search
 from tastytrade.streamer import DXLinkStreamer
@@ -420,8 +420,8 @@ async def get_market_metrics(ctx: Context, symbols: list[str]) -> str:
     Note extreme IV rank/percentile (0-1): low = cheap options (buy opportunity), high = expensive options (close positions).
     """
     session = get_valid_session(ctx)
-    metrics = await get_market_metrics(session, symbols)
-    return to_table(metrics)
+    result = await metrics.get_market_metrics(session, symbols)
+    return to_table(result)
 
 
 def _get_next_open_time(session, current_time: datetime) -> datetime | None:
