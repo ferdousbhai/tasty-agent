@@ -85,22 +85,12 @@ def get_context(ctx: Context) -> ServerContext:
 
 
 def get_valid_session(ctx: Context) -> Session:
-    """Get a valid session, refreshing if expired or about to expire.
+    """Get a valid session.
 
-    TastyTrade sessions expire after 15 minutes. This function checks the
-    expiration time and refreshes proactively if within 5 seconds of expiry.
+    The tastytrade SDK auto-refreshes tokens before each API call,
+    so we just return the session directly.
     """
-    context = get_context(ctx)
-    session = context.session
-
-    # Refresh if expired or expiring within 5 seconds (buffer for network latency)
-    time_until_expiry = (session.session_expiration - now_in_new_york()).total_seconds()
-    if time_until_expiry < 5:
-        logger.info(f"Session expiring in {time_until_expiry:.0f}s, refreshing...")
-        session.refresh()
-        logger.info(f"Session refreshed, new expiration: {session.session_expiration}")
-
-    return session
+    return get_context(ctx).session
 
 @asynccontextmanager
 async def lifespan(_) -> AsyncIterator[ServerContext]:
