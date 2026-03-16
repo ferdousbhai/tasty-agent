@@ -39,7 +39,7 @@ def session():
 async def account(session):
     """Get the first available account."""
     accounts = await Account.get(session)
-    assert len(accounts) > 0, "No accounts found"
+    assert accounts, "No accounts found"
     return accounts[0]
 
 
@@ -54,7 +54,7 @@ async def test_session_valid(session):
 async def test_get_accounts(session):
     """Should fetch at least one account."""
     accounts = await Account.get(session)
-    assert len(accounts) >= 1
+    assert accounts
     assert accounts[0].account_number is not None
 
 
@@ -78,7 +78,7 @@ async def test_get_positions(session, account):
 async def test_symbol_search(session):
     """Should find results for AAPL."""
     results = await symbol_search(session, "AAPL")
-    assert len(results) > 0
+    assert results
     symbols = [r.symbol for r in results]
     assert "AAPL" in symbols
 
@@ -87,7 +87,7 @@ async def test_symbol_search(session):
 async def test_get_market_metrics(session):
     """Should return metrics for AAPL."""
     metrics = await get_market_metrics(session, ["AAPL"])
-    assert len(metrics) > 0
+    assert metrics
     assert metrics[0].symbol == "AAPL"
 
 
@@ -95,17 +95,16 @@ async def test_get_market_metrics(session):
 async def test_get_option_chain(session):
     """Should return option chain with expiration dates and options."""
     chain = await get_option_chain(session, "AAPL")
-    assert len(chain) > 0
+    assert chain
     first_expiration = next(iter(chain))
-    options = chain[first_expiration]
-    assert len(options) > 0
+    assert chain[first_expiration]
 
 
 @skip_no_creds
 async def test_get_market_sessions(session):
     """Should return market session info for NYSE (Equity)."""
     sessions = await get_market_sessions(session, [ExchangeType.NYSE])
-    assert len(sessions) > 0
+    assert sessions
     assert sessions[0].status is not None
 
 
@@ -120,7 +119,7 @@ async def test_get_market_holidays(session):
 
 @skip_no_creds
 async def test_dry_run_equity_order(session, account):
-    """Should reach the API for a dry-run order (success or validation error both prove the call works)."""
+    """Dry-run order should reach the API (validation errors still prove connectivity)."""
     equity = await Equity.get(session, "AAPL")
     leg = equity.build_leg(Decimal("1"), OrderAction.BUY)
     order = NewOrder(

@@ -4,6 +4,7 @@ from datetime import UTC, date, datetime
 from unittest.mock import Mock
 
 import pytest
+from tastytrade.market_sessions import MarketStatus
 
 from tasty_agent.server import (
     InstrumentDetail,
@@ -102,8 +103,6 @@ class TestGetNextOpenTime:
     """Tests for _get_next_open_time function."""
 
     def test_pre_market_returns_open_at(self):
-        from tastytrade.market_sessions import MarketStatus
-
         mock_session = Mock()
         mock_session.status = MarketStatus.PRE_MARKET
         mock_session.open_at = datetime(2024, 12, 20, 9, 30, tzinfo=UTC)
@@ -112,8 +111,6 @@ class TestGetNextOpenTime:
         assert result == mock_session.open_at
 
     def test_closed_before_open_returns_open_at(self):
-        from tastytrade.market_sessions import MarketStatus
-
         mock_session = Mock()
         mock_session.status = MarketStatus.CLOSED
         mock_session.open_at = datetime(2024, 12, 20, 14, 30, tzinfo=UTC)
@@ -124,8 +121,6 @@ class TestGetNextOpenTime:
         assert result == mock_session.open_at
 
     def test_extended_returns_next_session_open(self):
-        from tastytrade.market_sessions import MarketStatus
-
         mock_next = Mock()
         mock_next.open_at = datetime(2024, 12, 21, 14, 30, tzinfo=UTC)
 
@@ -137,8 +132,6 @@ class TestGetNextOpenTime:
         assert result == mock_next.open_at
 
     def test_open_returns_none(self):
-        from tastytrade.market_sessions import MarketStatus
-
         mock_session = Mock()
         mock_session.status = MarketStatus.OPEN
 
@@ -215,9 +208,3 @@ class TestInstrumentDetail:
         detail = InstrumentDetail("AAPL", mock_instrument)
         assert detail.streamer_symbol == "AAPL"
         assert detail.instrument == mock_instrument
-
-    def test_attribute_access(self):
-        mock_instrument = Mock()
-        mock_instrument.symbol = "AAPL"
-        detail = InstrumentDetail("AAPL", mock_instrument)
-        assert detail.instrument.symbol == "AAPL"
