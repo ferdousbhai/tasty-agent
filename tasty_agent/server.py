@@ -38,15 +38,23 @@ async def _stream_events(
     timeout: float
 ) -> list[Any]:
     """Generic streaming helper for Quote/Greeks events."""
+    events_by_symbol: dict[str, Any] = {}
+    expected = set(streamer_symbols)
     async with DXLinkStreamer(session) as streamer:
         await streamer.subscribe(event_type, streamer_symbols)
-        events_by_symbol: dict[str, Any] = {}
-        expected = set(streamer_symbols)
-        while len(events_by_symbol) < len(expected):
-            event = await asyncio.wait_for(streamer.get_event(event_type), timeout=timeout)
-            if event.event_symbol in expected:
-                events_by_symbol[event.event_symbol] = event
-        return [events_by_symbol[s] for s in streamer_symbols]
+        try:
+            async with asyncio.timeout(timeout):
+                while len(events_by_symbol) < len(expected):
+                    event = await streamer.get_event(event_type)
+                    if event.event_symbol in expected:
+                        events_by_symbol[event.event_symbol] = event
+        except TimeoutError:
+            missing = expected - set(events_by_symbol)
+            raise ValueError(
+                f"Timeout getting quotes after {timeout}s. "
+                f"No data received for: {sorted(missing)}"
+            )
+    return [events_by_symbol[s] for s in streamer_symbols]
 
 
 async def _paginate[T](
@@ -165,7 +173,7 @@ async def get_net_liquidating_value_history(
 class InstrumentDetail:
     """Details for a resolved instrument."""
     streamer_symbol: str
-    instrument: Equity | Option | Future | None
+    instrument: Equity | Option | Future
 
 
 class InstrumentSpec(BaseModel):
@@ -270,7 +278,10 @@ async def get_instrument_details(session: Session, instrument_specs: list[Instru
             return InstrumentDetail(instrument.streamer_symbol, instrument)
 
         elif resolved_type == InstrumentType.INDEX:
-            return InstrumentDetail(symbol, None)
+            # Indices (SPX, VIX, etc.) are equities with is_index=True in the API.
+            # We must fetch via Equity.get() to obtain the correct streamer_symbol.
+            instrument = await Equity.get(session, symbol)
+            return InstrumentDetail(instrument.streamer_symbol, instrument)
 
         else:
             # Get equity instrument
@@ -316,10 +327,7 @@ async def get_quotes(
     session = get_session(ctx)
     instrument_details = await get_instrument_details(session, instruments)
 
-    try:
-        quotes = await _stream_events(session, Quote, [d.streamer_symbol for d in instrument_details], timeout)
-    except TimeoutError as e:
-        raise ValueError(f"Timeout getting quotes for {len(instruments)} instruments after {timeout}s") from e
+    quotes = await _stream_events(session, Quote, [d.streamer_symbol for d in instrument_details], timeout)
     return to_table(quotes)
 
 
@@ -353,10 +361,7 @@ async def get_greeks(
     session = get_session(ctx)
     option_details = await get_instrument_details(session, options)
 
-    try:
-        greeks = await _stream_events(session, Greeks, [d.streamer_symbol for d in option_details], timeout)
-    except TimeoutError as e:
-        raise ValueError(f"Timeout getting Greeks for {len(options)} options after {timeout}s") from e
+    greeks = await _stream_events(session, Greeks, [d.streamer_symbol for d in option_details], timeout)
     return to_table(greeks)
 
 
@@ -495,8 +500,8 @@ def build_order_legs(instrument_details: list[InstrumentDetail], legs: list[Orde
     built_legs = []
     for detail, leg_spec in zip(instrument_details, legs, strict=True):
         instrument = detail.instrument
-        if instrument is None:
-            raise ValueError(f"Cannot place orders for index symbols (streamer-only)")
+        if isinstance(instrument, Equity) and instrument.is_index:
+            raise ValueError(f"Cannot place orders for index symbol '{detail.streamer_symbol}' (quote-only)")
         if isinstance(instrument, (Option, Future)):
             order_action = OrderAction(leg_spec.action)
         else:
