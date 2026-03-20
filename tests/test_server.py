@@ -1,7 +1,8 @@
 """Unit tests for tasty_agent.server module."""
 
+import asyncio
 from datetime import UTC, date, datetime
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 from tastytrade.market_sessions import MarketStatus
@@ -13,6 +14,7 @@ from tasty_agent.server import (
     WatchlistSymbol,
     _get_next_open_time,
     _option_chain_key_builder,
+    _stream_events,
     build_order_legs,
     to_table,
     validate_date_format,
@@ -208,3 +210,57 @@ class TestInstrumentDetail:
         detail = InstrumentDetail("AAPL", mock_instrument)
         assert detail.streamer_symbol == "AAPL"
         assert detail.instrument == mock_instrument
+
+
+class TestStreamEvents:
+    """Tests for _stream_events timeout handling (issue #12)."""
+
+    @pytest.mark.asyncio
+    async def test_timeout_raises_valueerror_not_exceptiongroup(self):
+        """Verify timeout produces a clean ValueError, not an ExceptionGroup."""
+        mock_session = Mock()
+
+        mock_streamer = AsyncMock()
+        mock_streamer.__aenter__ = AsyncMock(return_value=mock_streamer)
+        mock_streamer.__aexit__ = AsyncMock(return_value=False)
+        mock_streamer.subscribe = AsyncMock()
+
+        async def block_forever(_):
+            await asyncio.sleep(999)
+        mock_streamer.get_event = block_forever
+
+        with patch("tasty_agent.server.DXLinkStreamer", return_value=mock_streamer):
+            with pytest.raises(ValueError, match="Timeout getting quotes after"):
+                from tastytrade.dxfeed import Quote
+                await _stream_events(mock_session, Quote, ["AAPL"], timeout=0.1)
+
+    @pytest.mark.asyncio
+    async def test_returns_events_in_order(self):
+        """Verify events are returned in the same order as input symbols."""
+        mock_session = Mock()
+
+        event_a = Mock()
+        event_a.event_symbol = "AAPL"
+        event_b = Mock()
+        event_b.event_symbol = "TSLA"
+
+        events = [event_b, event_a]
+        call_count = 0
+
+        async def fake_get_event(_):
+            nonlocal call_count
+            event = events[call_count]
+            call_count += 1
+            return event
+
+        mock_streamer = AsyncMock()
+        mock_streamer.__aenter__ = AsyncMock(return_value=mock_streamer)
+        mock_streamer.__aexit__ = AsyncMock(return_value=False)
+        mock_streamer.subscribe = AsyncMock()
+        mock_streamer.get_event = fake_get_event
+
+        with patch("tasty_agent.server.DXLinkStreamer", return_value=mock_streamer):
+            from tastytrade.dxfeed import Quote
+            result = await _stream_events(mock_session, Quote, ["AAPL", "TSLA"], timeout=5.0)
+
+        assert result == [event_a, event_b]

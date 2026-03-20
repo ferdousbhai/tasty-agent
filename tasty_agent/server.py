@@ -18,7 +18,7 @@ from pydantic import BaseModel, Field
 from tabulate import tabulate
 from tastytrade import Account, Session, metrics
 from tastytrade.dxfeed import Greeks, Quote
-from tastytrade.instruments import Equity, Option, get_option_chain
+from tastytrade.instruments import Equity, Future, Option, get_option_chain
 from tastytrade.market_sessions import ExchangeType, MarketStatus, get_market_holidays, get_market_sessions
 from tastytrade.order import InstrumentType, NewOrder, OrderAction, OrderTimeInForce, OrderType
 from tastytrade.search import symbol_search
@@ -38,15 +38,23 @@ async def _stream_events(
     timeout: float
 ) -> list[Any]:
     """Generic streaming helper for Quote/Greeks events."""
+    events_by_symbol: dict[str, Any] = {}
+    expected = set(streamer_symbols)
     async with DXLinkStreamer(session) as streamer:
         await streamer.subscribe(event_type, streamer_symbols)
-        events_by_symbol: dict[str, Any] = {}
-        expected = set(streamer_symbols)
-        while len(events_by_symbol) < len(expected):
-            event = await asyncio.wait_for(streamer.get_event(event_type), timeout=timeout)
-            if event.event_symbol in expected:
-                events_by_symbol[event.event_symbol] = event
-        return [events_by_symbol[s] for s in streamer_symbols]
+        try:
+            async with asyncio.timeout(timeout):
+                while len(events_by_symbol) < len(expected):
+                    event = await streamer.get_event(event_type)
+                    if event.event_symbol in expected:
+                        events_by_symbol[event.event_symbol] = event
+        except TimeoutError:
+            missing = expected - set(events_by_symbol)
+            raise ValueError(
+                f"Timeout getting quotes after {timeout}s. "
+                f"No data received for: {sorted(missing)}"
+            )
+    return [events_by_symbol[s] for s in streamer_symbols]
 
 
 async def _paginate[T](
@@ -165,12 +173,13 @@ async def get_net_liquidating_value_history(
 class InstrumentDetail:
     """Details for a resolved instrument."""
     streamer_symbol: str
-    instrument: Equity | Option
+    instrument: Equity | Option | Future
 
 
 class InstrumentSpec(BaseModel):
-    """Specification for an instrument (stock or option)."""
-    symbol: str = Field(..., description="Stock symbol (e.g., 'AAPL', 'TQQQ')")
+    """Specification for an instrument (stock, option, future, or index)."""
+    symbol: str = Field(..., description="Symbol (e.g., 'AAPL', '/ESH26', 'SPX')")
+    instrument_type: Literal['Equity', 'Future', 'Index'] | None = Field(None, description="Instrument type. Auto-detected if omitted: '/' prefix → Future, option fields → Option, otherwise Equity. Use 'Index' for index symbols like SPX, VIX, NDX.")
     option_type: Literal['C', 'P'] | None = Field(None, description="Option type: 'C' for call, 'P' for put (omit for stocks)")
     strike_price: float | None = Field(None, description="Strike price (required for options)")
     expiration_date: str | None = Field(None, description="Expiration date in YYYY-MM-DD format (required for options)")
@@ -222,13 +231,25 @@ async def get_cached_option_chain(session: Session, symbol: str):
     return await get_option_chain(session, symbol)
 
 
+def _resolve_instrument_type(spec: InstrumentSpec) -> InstrumentType:
+    """Determine instrument type from spec fields."""
+    if spec.instrument_type:
+        return InstrumentType(spec.instrument_type)
+    if spec.option_type:
+        return InstrumentType.EQUITY_OPTION
+    if spec.symbol.startswith('/'):
+        return InstrumentType.FUTURE
+    return InstrumentType.EQUITY
+
+
 async def get_instrument_details(session: Session, instrument_specs: list[InstrumentSpec]) -> list[InstrumentDetail]:
     """Get instrument details with validation and caching."""
     async def lookup_single_instrument(spec: InstrumentSpec) -> InstrumentDetail:
         symbol = spec.symbol.upper()
-        option_type = spec.option_type
+        resolved_type = _resolve_instrument_type(spec)
 
-        if option_type:
+        if resolved_type == InstrumentType.EQUITY_OPTION:
+            option_type = spec.option_type
             # Validate option parameters
             strike_price = validate_strike_price(spec.strike_price)
             expiration_date = spec.expiration_date
@@ -251,6 +272,17 @@ async def get_instrument_details(session: Session, instrument_specs: list[Instru
 
             available_strikes = [opt.strike_price for opt in chain[target_date] if opt.option_type.value == option_type]
             raise ValueError(f"Option not found: {symbol} {expiration_date} {option_type} {strike_price}. Available strikes: {sorted(set(available_strikes))}")
+
+        elif resolved_type == InstrumentType.FUTURE:
+            instrument = await Future.get(session, symbol)
+            return InstrumentDetail(instrument.streamer_symbol, instrument)
+
+        elif resolved_type == InstrumentType.INDEX:
+            # Indices (SPX, VIX, etc.) are equities with is_index=True in the API.
+            # We must fetch via Equity.get() to obtain the correct streamer_symbol.
+            instrument = await Equity.get(session, symbol)
+            return InstrumentDetail(instrument.streamer_symbol, instrument)
+
         else:
             # Get equity instrument
             instrument = await Equity.get(session, symbol)
@@ -266,23 +298,27 @@ async def get_quotes(
     timeout: float = 10.0
 ) -> str:
     """
-    Get live quotes for multiple stocks and/or options.
+    Get live quotes for stocks, options, futures, and indices.
 
     Args:
         instruments: List of instrument specifications. Each contains:
-            - symbol: str - Stock symbol (e.g., 'AAPL', 'TQQQ')
-            - option_type: 'C' or 'P' (optional, omit for stocks)
+            - symbol: str - Symbol (e.g., 'AAPL', '/ESH26', 'SPX')
+            - instrument_type: str - Optional. Auto-detected if omitted ('/' prefix → Future).
+              Use 'Index' for index symbols (SPX, VIX, NDX).
+            - option_type: 'C' or 'P' (optional, omit for stocks/futures/indices)
             - strike_price: float (required for options)
             - expiration_date: str - YYYY-MM-DD format (required for options)
         timeout: Timeout in seconds
 
     Examples:
-        Single stock: get_quotes([{"symbol": "AAPL"}])
-        Single option: get_quotes([{"symbol": "TQQQ", "option_type": "C", "strike_price": 100.0, "expiration_date": "2026-01-16"}])
-        Multiple instruments: get_quotes([
+        Stock: get_quotes([{"symbol": "AAPL"}])
+        Future: get_quotes([{"symbol": "/ESM26"}])
+        Index: get_quotes([{"symbol": "SPX", "instrument_type": "Index"}])
+        Option: get_quotes([{"symbol": "TQQQ", "option_type": "C", "strike_price": 100.0, "expiration_date": "2026-01-16"}])
+        Mixed: get_quotes([
             {"symbol": "AAPL"},
-            {"symbol": "AAPL", "option_type": "C", "strike_price": 150.0, "expiration_date": "2024-12-20"},
-            {"symbol": "AAPL", "option_type": "C", "strike_price": 155.0, "expiration_date": "2024-12-20"}
+            {"symbol": "/ESM26"},
+            {"symbol": "VIX", "instrument_type": "Index"}
         ])
     """
     if not instruments:
@@ -291,10 +327,7 @@ async def get_quotes(
     session = get_session(ctx)
     instrument_details = await get_instrument_details(session, instruments)
 
-    try:
-        quotes = await _stream_events(session, Quote, [d.streamer_symbol for d in instrument_details], timeout)
-    except TimeoutError as e:
-        raise ValueError(f"Timeout getting quotes for {len(instruments)} instruments after {timeout}s") from e
+    quotes = await _stream_events(session, Quote, [d.streamer_symbol for d in instrument_details], timeout)
     return to_table(quotes)
 
 
@@ -328,10 +361,7 @@ async def get_greeks(
     session = get_session(ctx)
     option_details = await get_instrument_details(session, options)
 
-    try:
-        greeks = await _stream_events(session, Greeks, [d.streamer_symbol for d in option_details], timeout)
-    except TimeoutError as e:
-        raise ValueError(f"Timeout getting Greeks for {len(options)} options after {timeout}s") from e
+    greeks = await _stream_events(session, Greeks, [d.streamer_symbol for d in option_details], timeout)
     return to_table(greeks)
 
 
@@ -470,7 +500,9 @@ def build_order_legs(instrument_details: list[InstrumentDetail], legs: list[Orde
     built_legs = []
     for detail, leg_spec in zip(instrument_details, legs, strict=True):
         instrument = detail.instrument
-        if isinstance(instrument, Option):
+        if isinstance(instrument, Equity) and instrument.is_index:
+            raise ValueError(f"Cannot place orders for index symbol '{detail.streamer_symbol}' (quote-only)")
+        if isinstance(instrument, (Option, Future)):
             order_action = OrderAction(leg_spec.action)
         else:
             order_action = OrderAction.BUY if leg_spec.action == 'Buy' else OrderAction.SELL
@@ -518,15 +550,15 @@ async def place_order(
     dry_run: bool = False
 ) -> dict[str, Any]:
     """
-    Place multi-leg options/equity orders.
+    Place multi-leg options/equity/futures orders.
 
     Args:
         legs: List of leg specifications. Each leg contains:
-            - symbol: str - Stock symbol (e.g., 'TQQQ', 'AAPL')
+            - symbol: str - Symbol (e.g., 'AAPL', '/ESM26')
             - action: For stocks: 'Buy' or 'Sell'
-                     For options: 'Buy to Open', 'Buy to Close', 'Sell to Open', 'Sell to Close'
+                     For options/futures: 'Buy to Open', 'Buy to Close', 'Sell to Open', 'Sell to Close'
             - quantity: int - Number of contracts/shares
-            - option_type: 'C' or 'P' (optional, omit for stocks)
+            - option_type: 'C' or 'P' (optional, omit for stocks/futures)
             - strike_price: float (required for options)
             - expiration_date: str - YYYY-MM-DD format (required for options)
         price: If None, calculates net mid-price from quotes.
@@ -539,6 +571,7 @@ async def place_order(
 
     Examples:
         Auto-priced stock: place_order([{"symbol": "AAPL", "action": "Buy", "quantity": 100}])
+        Future: place_order([{"symbol": "/ESM26", "action": "Buy to Open", "quantity": 1}], -5500.00)
         Manual-priced option: place_order([{"symbol": "TQQQ", "option_type": "C", "action": "Buy to Open", "quantity": 17, "strike_price": 100.0, "expiration_date": "2026-01-16"}], -8.50)
         Auto-priced spread: place_order([
             {"symbol": "AAPL", "option_type": "C", "action": "Buy to Open", "quantity": 1, "strike_price": 150.0, "expiration_date": "2024-12-20"},
