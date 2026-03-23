@@ -5,13 +5,14 @@ from datetime import UTC, date, datetime
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
-from tastytrade.market_sessions import MarketStatus
+from tastytrade.market_sessions import ExchangeType, MarketStatus
 
 from tasty_agent.server import (
     InstrumentDetail,
     InstrumentSpec,
     OrderLeg,
     WatchlistSymbol,
+    _exchanges_for_symbols,
     _get_next_open_time,
     _option_chain_key_builder,
     _stream_events,
@@ -212,6 +213,26 @@ class TestInstrumentDetail:
         assert detail.instrument == mock_instrument
 
 
+class TestExchangesForSymbols:
+    """Tests for _exchanges_for_symbols helper."""
+
+    def test_equity_symbols(self):
+        assert _exchanges_for_symbols(["AAPL", "TSLA"]) == {ExchangeType.NYSE}
+
+    def test_futures_cme(self):
+        assert _exchanges_for_symbols(["/ESM26:XCME"]) == {ExchangeType.CME}
+
+    def test_futures_cfe(self):
+        assert _exchanges_for_symbols(["/VXJ26:XCBF"]) == {ExchangeType.CFE}
+
+    def test_vx_prefix_without_xcbf(self):
+        assert _exchanges_for_symbols(["/VXJ26"]) == {ExchangeType.CFE}
+
+    def test_mixed_symbols(self):
+        result = _exchanges_for_symbols(["AAPL", "/ESM26:XCME", "/VXJ26:XCBF"])
+        assert result == {ExchangeType.NYSE, ExchangeType.CME, ExchangeType.CFE}
+
+
 class TestStreamEvents:
     """Tests for _stream_events timeout handling (issue #12)."""
 
@@ -229,7 +250,8 @@ class TestStreamEvents:
             await asyncio.sleep(999)
         mock_streamer.get_event = block_forever
 
-        with patch("tasty_agent.server.DXLinkStreamer", return_value=mock_streamer):
+        with patch("tasty_agent.server.DXLinkStreamer", return_value=mock_streamer), \
+             patch("tasty_agent.server._market_status_message", return_value=None):
             with pytest.raises(ValueError, match="Timeout getting quotes after"):
                 from tastytrade.dxfeed import Quote
                 await _stream_events(mock_session, Quote, ["AAPL"], timeout=0.1)
@@ -264,3 +286,67 @@ class TestStreamEvents:
             result = await _stream_events(mock_session, Quote, ["AAPL", "TSLA"], timeout=5.0)
 
         assert result == [event_a, event_b]
+
+    @pytest.mark.asyncio
+    async def test_exceptiongroup_from_streamer_cleanup_produces_valueerror(self):
+        """Verify ExceptionGroup from DXLinkStreamer cleanup is caught and converted."""
+        mock_session = Mock()
+
+        async def failing_context(*args, **kwargs):
+            raise ExceptionGroup("unhandled errors in a TaskGroup", [
+                RuntimeError("websocket closed"),
+            ])
+
+        mock_streamer = AsyncMock()
+        mock_streamer.__aenter__ = AsyncMock(side_effect=failing_context)
+        mock_streamer.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("tasty_agent.server.DXLinkStreamer", return_value=mock_streamer), \
+             patch("tasty_agent.server._market_status_message", return_value=None):
+            with pytest.raises(ValueError, match="Streaming connection error"):
+                from tastytrade.dxfeed import Quote
+                await _stream_events(mock_session, Quote, ["SPX"], timeout=5.0)
+
+    @pytest.mark.asyncio
+    async def test_timeout_shows_market_closed_message(self):
+        """Verify market-closed message is shown instead of generic timeout."""
+        mock_session = Mock()
+
+        mock_streamer = AsyncMock()
+        mock_streamer.__aenter__ = AsyncMock(return_value=mock_streamer)
+        mock_streamer.__aexit__ = AsyncMock(return_value=False)
+        mock_streamer.subscribe = AsyncMock()
+
+        async def block_forever(_):
+            await asyncio.sleep(999)
+        mock_streamer.get_event = block_forever
+
+        market_msg = "Market is currently closed: Equity (opens in 14 hours). Live quotes are not available while the market is closed."
+
+        with patch("tasty_agent.server.DXLinkStreamer", return_value=mock_streamer), \
+             patch("tasty_agent.server._market_status_message", return_value=market_msg):
+            with pytest.raises(ValueError, match="Market is currently closed"):
+                from tastytrade.dxfeed import Quote
+                await _stream_events(mock_session, Quote, ["AAPL"], timeout=0.1)
+
+    @pytest.mark.asyncio
+    async def test_exceptiongroup_shows_market_closed_message(self):
+        """Verify market-closed message is shown for ExceptionGroup when market is closed."""
+        mock_session = Mock()
+
+        async def failing_context(*args, **kwargs):
+            raise ExceptionGroup("unhandled errors in a TaskGroup", [
+                RuntimeError("websocket closed"),
+            ])
+
+        mock_streamer = AsyncMock()
+        mock_streamer.__aenter__ = AsyncMock(side_effect=failing_context)
+        mock_streamer.__aexit__ = AsyncMock(return_value=False)
+
+        market_msg = "Market is currently closed: CFE (closed). Live quotes are not available while the market is closed."
+
+        with patch("tasty_agent.server.DXLinkStreamer", return_value=mock_streamer), \
+             patch("tasty_agent.server._market_status_message", return_value=market_msg):
+            with pytest.raises(ValueError, match="Market is currently closed"):
+                from tastytrade.dxfeed import Quote
+                await _stream_events(mock_session, Quote, ["/VXJ26:XCBF"], timeout=5.0)

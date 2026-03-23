@@ -31,6 +31,62 @@ logger = logging.getLogger(__name__)
 rate_limiter = AsyncLimiter(2, 1) # 2 requests per second
 
 
+def _exchanges_for_symbols(streamer_symbols: list[str]) -> set[ExchangeType]:
+    """Determine which exchanges to check based on streamer symbols.
+
+    Maps streamer symbol prefixes/suffixes to exchange types:
+    - /VX* or :XCBF suffix → CFE (CBOE Futures Exchange)
+    - /* (other futures) → CME
+    - Everything else → NYSE (covers all US equities in the tastytrade API)
+    """
+    exchanges: set[ExchangeType] = set()
+    for sym in streamer_symbols:
+        if sym.startswith("/"):
+            if ":XCBF" in sym or sym.startswith("/VX"):
+                exchanges.add(ExchangeType.CFE)
+            else:
+                exchanges.add(ExchangeType.CME)
+        else:
+            exchanges.add(ExchangeType.NYSE)
+    return exchanges
+
+
+async def _market_status_message(session: Session, exchanges: set[ExchangeType]) -> str | None:
+    """Check if relevant markets are closed and return a human-readable message, or None if open."""
+    try:
+        market_sessions = await get_market_sessions(session, list(exchanges))
+    except Exception:
+        logger.debug("Failed to fetch market sessions for %s", exchanges, exc_info=True)
+        return None
+
+    current_time = datetime.now(UTC)
+    closed: list[str] = []
+    for ms in market_sessions:
+        if ms.status != MarketStatus.OPEN:
+            next_open = _get_next_open_time(ms, current_time)
+            label = ms.instrument_collection
+            if next_open:
+                delta = humanize.naturaldelta(next_open - current_time)
+                closed.append(f"{label} (opens in {delta})")
+            else:
+                closed.append(f"{label} (closed)")
+    if closed:
+        return f"Market is currently closed: {', '.join(closed)}. Live quotes are not available while the market is closed."
+    return None
+
+
+async def _raise_with_market_context(
+    session: Session,
+    exchanges: set[ExchangeType],
+    fallback_error: ValueError
+) -> None:
+    """Raise a market-closed message if applicable, otherwise raise the fallback error."""
+    market_msg = await _market_status_message(session, exchanges)
+    if market_msg:
+        raise ValueError(market_msg) from None
+    raise fallback_error
+
+
 async def _stream_events(
     session: Session,
     event_type: type[Quote] | type[Greeks],
@@ -40,20 +96,40 @@ async def _stream_events(
     """Generic streaming helper for Quote/Greeks events."""
     events_by_symbol: dict[str, Any] = {}
     expected = set(streamer_symbols)
-    async with DXLinkStreamer(session) as streamer:
-        await streamer.subscribe(event_type, streamer_symbols)
-        try:
-            async with asyncio.timeout(timeout):
-                while len(events_by_symbol) < len(expected):
-                    event = await streamer.get_event(event_type)
-                    if event.event_symbol in expected:
-                        events_by_symbol[event.event_symbol] = event
-        except TimeoutError:
-            missing = expected - set(events_by_symbol)
-            raise ValueError(
-                f"Timeout getting quotes after {timeout}s. "
-                f"No data received for: {sorted(missing)}"
-            )
+    exchanges = _exchanges_for_symbols(streamer_symbols)
+    timed_out = False
+    try:
+        async with DXLinkStreamer(session) as streamer:
+            await streamer.subscribe(event_type, streamer_symbols)
+            try:
+                async with asyncio.timeout(timeout):
+                    while len(events_by_symbol) < len(expected):
+                        event = await streamer.get_event(event_type)
+                        if event.event_symbol in expected:
+                            events_by_symbol[event.event_symbol] = event
+            except TimeoutError:
+                # Don't raise here — we're still inside DXLinkStreamer's TaskGroup.
+                # Any exception through the yield point can get wrapped in an
+                # ExceptionGroup during background task cleanup.
+                timed_out = True
+    except ExceptionGroup as eg:
+        # DXLinkStreamer uses anyio's create_task_group() for its reader/heartbeat.
+        # If the websocket is in a bad state (e.g. market closed), background task
+        # cleanup can fail and wrap errors in an ExceptionGroup.
+        errors = "; ".join(f"{type(e).__name__}: {e}" for e in eg.exceptions)
+        await _raise_with_market_context(
+            session, exchanges,
+            ValueError(f"Streaming connection error for {sorted(expected)}: {errors}")
+        )
+
+    # Must check market status after streamer context is closed, since the
+    # streamer's cleanup may itself raise if the connection is broken.
+    if timed_out:
+        missing = expected - set(events_by_symbol)
+        await _raise_with_market_context(
+            session, exchanges,
+            ValueError(f"Timeout getting quotes after {timeout}s. No data received for: {sorted(missing)}")
+        )
     return [events_by_symbol[s] for s in streamer_symbols]
 
 
