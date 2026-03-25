@@ -30,6 +30,16 @@ logger = logging.getLogger(__name__)
 
 rate_limiter = AsyncLimiter(2, 1) # 2 requests per second
 
+# Patch tastytrade's Quote model to accept NaN values from DXLink for index symbols.
+# Index symbols (SPX, VIX) return NaN for bid_size/ask_size since indices don't have
+# order books. The library's change_nan_to_none validator converts NaN to None, but
+# the Decimal fields reject None, causing silent ValidationErrors that drop events.
+# Only patch size fields — prices should remain non-nullable to surface real issues.
+# TODO: remove once https://github.com/tastyware/tastytrade/issues/XXX is fixed upstream
+for _field_name in ('bid_size', 'ask_size'):
+    Quote.model_fields[_field_name].annotation = Decimal | None
+Quote.model_rebuild(force=True)
+
 
 def _exchanges_for_symbols(streamer_symbols: list[str]) -> set[ExchangeType]:
     """Determine which exchanges to check based on streamer symbols.
@@ -209,6 +219,17 @@ async def lifespan(_) -> AsyncIterator[ServerContext]:
     )
 
 mcp_app = FastMCP("TastyTrade", lifespan=lifespan)
+
+
+def main() -> None:
+    """CLI entry point — accepts optional transport argument (stdio, sse, streamable-http)."""
+    import sys
+    valid = ("stdio", "sse", "streamable-http")
+    transport = sys.argv[1] if len(sys.argv) > 1 else "stdio"
+    if transport not in valid:
+        print(f"Invalid transport '{transport}'. Must be one of: {', '.join(valid)}", file=sys.stderr)
+        sys.exit(1)
+    mcp_app.run(transport)  # type: ignore[arg-type]  # validated above
 
 # =============================================================================
 # ACCOUNT & POSITION TOOLS

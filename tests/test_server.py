@@ -350,3 +350,46 @@ class TestStreamEvents:
             with pytest.raises(ValueError, match="Market is currently closed"):
                 from tastytrade.dxfeed import Quote
                 await _stream_events(mock_session, Quote, ["/VXJ26:XCBF"], timeout=5.0)
+
+
+class TestQuoteNaNPatch:
+    """Tests for the Quote model patch that allows NaN sizes for index symbols."""
+
+    def test_index_quotes_with_nan_sizes(self):
+        """Verify index symbols (SPX, VIX) with NaN bid/ask sizes are not silently dropped."""
+        from decimal import Decimal
+
+        from tastytrade.dxfeed import Quote
+
+        raw_data = [
+            'SPX', 0, 0, 0, 0, '\x00', 0, '\x00',
+            4122.49, 4123.65, 'NaN', 'NaN'
+        ]
+        result = Quote.from_stream(raw_data)
+        assert len(result) == 1, "Index quote with NaN sizes should not be dropped"
+        assert result[0].event_symbol == 'SPX'
+        assert result[0].bid_price == Decimal('4122.49')
+        assert result[0].ask_price == Decimal('4123.65')
+        assert result[0].bid_size is None
+        assert result[0].ask_size is None
+
+    def test_equity_quotes_still_parse(self):
+        """Verify the NaN patch doesn't break normal equity quote parsing."""
+        from decimal import Decimal
+
+        from tastytrade.dxfeed import Quote
+
+        raw_data = ['AAPL', 0, 0, 0, 0, 'Q', 0, 'Q', 185.50, 185.55, 400, 1300]
+        result = Quote.from_stream(raw_data)
+        assert len(result) == 1
+        assert result[0].event_symbol == 'AAPL'
+        assert result[0].bid_size == Decimal('400')
+        assert result[0].ask_size == Decimal('1300')
+
+    def test_nan_prices_still_rejected(self):
+        """Ensure NaN prices cause the event to be dropped (only sizes are patched)."""
+        from tastytrade.dxfeed import Quote
+
+        raw_data = ['BAD', 0, 0, 0, 0, '\x00', 0, '\x00', 'NaN', 'NaN', 'NaN', 'NaN']
+        result = Quote.from_stream(raw_data)
+        assert len(result) == 0, "Quote with NaN prices should be dropped"

@@ -23,7 +23,7 @@ classifiers = [
 ]
 
 [project.scripts]
-tasty-agent = "tasty_agent.server:mcp_app.run"
+tasty-agent = "tasty_agent.server:main"
 
 [build-system]
 requires = ["hatchling", "hatch-vcs"]
