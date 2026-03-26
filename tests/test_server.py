@@ -16,6 +16,7 @@ from tasty_agent.server import (
     _get_next_open_time,
     _option_chain_key_builder,
     _stream_events,
+    _stream_quotes_with_trade_fallback,
     build_order_legs,
     to_table,
     validate_date_format,
@@ -350,6 +351,142 @@ class TestStreamEvents:
             with pytest.raises(ValueError, match="Market is currently closed"):
                 from tastytrade.dxfeed import Quote
                 await _stream_events(mock_session, Quote, ["/VXJ26:XCBF"], timeout=5.0)
+
+
+class TestStreamQuotesWithTradeFallback:
+    """Tests for _stream_quotes_with_trade_fallback (VIX Trade fallback, issue #10)."""
+
+    @pytest.mark.asyncio
+    async def test_vix_gets_trade_when_no_quote(self):
+        """VIX should get a Trade event when no Quote event is published."""
+        mock_session = Mock()
+
+        trade_event = Mock()
+        trade_event.event_symbol = "VIX"
+
+        quote_event = Mock()
+        quote_event.event_symbol = "AAPL"
+
+        async def fake_get_event(event_type):
+            from tastytrade.dxfeed import Quote, Trade
+            if event_type is Trade:
+                return trade_event
+            if event_type is Quote:
+                return quote_event
+            await asyncio.sleep(999)
+
+        mock_streamer = AsyncMock()
+        mock_streamer.__aenter__ = AsyncMock(return_value=mock_streamer)
+        mock_streamer.__aexit__ = AsyncMock(return_value=False)
+        mock_streamer.subscribe = AsyncMock()
+        mock_streamer.get_event = fake_get_event
+
+        with patch("tasty_agent.server.DXLinkStreamer", return_value=mock_streamer):
+            result = await _stream_quotes_with_trade_fallback(
+                mock_session, ["AAPL", "VIX"], {"VIX"}, timeout=5.0
+            )
+
+        assert result == [quote_event, trade_event]
+
+    @pytest.mark.asyncio
+    async def test_quote_preferred_over_trade(self):
+        """If both Quote and Trade arrive for an index, Quote should win."""
+        from tastytrade.dxfeed import Trade
+
+        mock_session = Mock()
+
+        quote_spx = Mock()
+        quote_spx.event_symbol = "SPX"
+
+        trade_spx = Mock(spec=Trade)
+        trade_spx.event_symbol = "SPX"
+
+        call_count = 0
+
+        async def fake_get_event(event_type):
+            nonlocal call_count
+            from tastytrade.dxfeed import Quote, Trade
+            call_count += 1
+            if event_type is Quote and call_count <= 2:
+                return quote_spx
+            if event_type is Trade:
+                return trade_spx
+            await asyncio.sleep(999)
+
+        mock_streamer = AsyncMock()
+        mock_streamer.__aenter__ = AsyncMock(return_value=mock_streamer)
+        mock_streamer.__aexit__ = AsyncMock(return_value=False)
+        mock_streamer.subscribe = AsyncMock()
+        mock_streamer.get_event = fake_get_event
+
+        with patch("tasty_agent.server.DXLinkStreamer", return_value=mock_streamer):
+            result = await _stream_quotes_with_trade_fallback(
+                mock_session, ["SPX"], {"SPX"}, timeout=5.0
+            )
+
+        assert result == [quote_spx]
+
+    @pytest.mark.asyncio
+    async def test_mixed_symbols_aapl_es_vix(self):
+        """Mixed query: AAPL (equity Quote), /ESM26 (futures Quote), VIX (Trade fallback)."""
+        mock_session = Mock()
+
+        quote_aapl = Mock()
+        quote_aapl.event_symbol = "AAPL"
+        quote_es = Mock()
+        quote_es.event_symbol = "/ESM26:XCME"
+        trade_vix = Mock()
+        trade_vix.event_symbol = "VIX"
+
+        quote_events = iter([quote_aapl, quote_es])
+
+        async def fake_get_event(event_type):
+            from tastytrade.dxfeed import Quote, Trade
+            if event_type is Quote:
+                try:
+                    return next(quote_events)
+                except StopIteration:
+                    await asyncio.sleep(999)
+            if event_type is Trade:
+                return trade_vix
+            await asyncio.sleep(999)
+
+        mock_streamer = AsyncMock()
+        mock_streamer.__aenter__ = AsyncMock(return_value=mock_streamer)
+        mock_streamer.__aexit__ = AsyncMock(return_value=False)
+        mock_streamer.subscribe = AsyncMock()
+        mock_streamer.get_event = fake_get_event
+
+        with patch("tasty_agent.server.DXLinkStreamer", return_value=mock_streamer):
+            result = await _stream_quotes_with_trade_fallback(
+                mock_session,
+                ["AAPL", "/ESM26:XCME", "VIX"],
+                {"VIX"},
+                timeout=5.0,
+            )
+
+        assert result == [quote_aapl, quote_es, trade_vix]
+
+    @pytest.mark.asyncio
+    async def test_timeout_raises_valueerror(self):
+        """Timeout with missing symbols should raise ValueError."""
+        mock_session = Mock()
+
+        async def block_forever(_):
+            await asyncio.sleep(999)
+
+        mock_streamer = AsyncMock()
+        mock_streamer.__aenter__ = AsyncMock(return_value=mock_streamer)
+        mock_streamer.__aexit__ = AsyncMock(return_value=False)
+        mock_streamer.subscribe = AsyncMock()
+        mock_streamer.get_event = block_forever
+
+        with patch("tasty_agent.server.DXLinkStreamer", return_value=mock_streamer), \
+             patch("tasty_agent.server._market_status_message", return_value=None):
+            with pytest.raises(ValueError, match="Timeout getting quotes after"):
+                await _stream_quotes_with_trade_fallback(
+                    mock_session, ["VIX"], {"VIX"}, timeout=0.1
+                )
 
 
 class TestQuoteNaNPatch:

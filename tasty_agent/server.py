@@ -17,7 +17,7 @@ from mcp.server.fastmcp.prompts.base import AssistantMessage, Message, UserMessa
 from pydantic import BaseModel, Field
 from tabulate import tabulate
 from tastytrade import Account, Session, metrics
-from tastytrade.dxfeed import Greeks, Quote
+from tastytrade.dxfeed import Greeks, Quote, Trade
 from tastytrade.instruments import Equity, Future, Option, get_option_chain
 from tastytrade.market_sessions import ExchangeType, MarketStatus, get_market_holidays, get_market_sessions
 from tastytrade.order import InstrumentType, NewOrder, OrderAction, OrderTimeInForce, OrderType
@@ -35,7 +35,7 @@ rate_limiter = AsyncLimiter(2, 1) # 2 requests per second
 # order books. The library's change_nan_to_none validator converts NaN to None, but
 # the Decimal fields reject None, causing silent ValidationErrors that drop events.
 # Only patch size fields — prices should remain non-nullable to surface real issues.
-# TODO: remove once https://github.com/tastyware/tastytrade/issues/XXX is fixed upstream
+# TODO: remove once https://github.com/tastyware/tastytrade/issues/322 is fixed upstream
 for _field_name in ('bid_size', 'ask_size'):
     Quote.model_fields[_field_name].annotation = Decimal | None
 Quote.model_rebuild(force=True)
@@ -140,6 +140,64 @@ async def _stream_events(
             session, exchanges,
             ValueError(f"Timeout getting quotes after {timeout}s. No data received for: {sorted(missing)}")
         )
+    return [events_by_symbol[s] for s in streamer_symbols]
+
+
+async def _stream_quotes_with_trade_fallback(
+    session: Session,
+    streamer_symbols: list[str],
+    index_symbols: set[str],
+    timeout: float
+) -> list[Quote | Trade]:
+    """Stream quotes, falling back to Trade events for index symbols.
+
+    Some indices (e.g., VIX) don't publish Quote events in dxFeed — they only
+    publish Trade events. We subscribe to both Quote and Trade for index symbols,
+    preferring Quote when available but accepting Trade as a fallback.
+    """
+    events_by_symbol: dict[str, Quote | Trade] = {}
+    expected = set(streamer_symbols)
+    exchanges = _exchanges_for_symbols(streamer_symbols)
+    timed_out = False
+    try:
+        async with DXLinkStreamer(session) as streamer:
+            await streamer.subscribe(Quote, streamer_symbols)
+            await streamer.subscribe(Trade, list(index_symbols))
+            try:
+                async with asyncio.timeout(timeout):
+                    while len(events_by_symbol) < len(expected):
+                        # Race Quote and Trade events — whichever arrives first wins.
+                        # Quote is preferred: Trade only fills gaps for index symbols.
+                        quote_task = asyncio.ensure_future(streamer.get_event(Quote))
+                        trade_task = asyncio.ensure_future(streamer.get_event(Trade))
+                        done, pending = await asyncio.wait(
+                            [quote_task, trade_task],
+                            return_when=asyncio.FIRST_COMPLETED,
+                        )
+                        for task in pending:
+                            task.cancel()
+                        for task in done:
+                            event = task.result()
+                            if event.event_symbol in expected:
+                                if isinstance(event, Trade) and event.event_symbol in events_by_symbol:
+                                    continue  # Already have a Quote for this symbol
+                                events_by_symbol[event.event_symbol] = event
+            except TimeoutError:
+                timed_out = True
+    except ExceptionGroup as eg:
+        errors = "; ".join(f"{type(e).__name__}: {e}" for e in eg.exceptions)
+        await _raise_with_market_context(
+            session, exchanges,
+            ValueError(f"Streaming connection error for {sorted(expected)}: {errors}")
+        )
+
+    if timed_out:
+        missing = expected - set(events_by_symbol)
+        if missing:
+            await _raise_with_market_context(
+                session, exchanges,
+                ValueError(f"Timeout getting quotes after {timeout}s. No data received for: {sorted(missing)}")
+            )
     return [events_by_symbol[s] for s in streamer_symbols]
 
 
@@ -271,6 +329,7 @@ class InstrumentDetail:
     """Details for a resolved instrument."""
     streamer_symbol: str
     instrument: Equity | Option | Future
+    is_index: bool = False
 
 
 class InstrumentSpec(BaseModel):
@@ -378,7 +437,7 @@ async def get_instrument_details(session: Session, instrument_specs: list[Instru
             # Indices (SPX, VIX, etc.) are equities with is_index=True in the API.
             # We must fetch via Equity.get() to obtain the correct streamer_symbol.
             instrument = await Equity.get(session, symbol)
-            return InstrumentDetail(instrument.streamer_symbol, instrument)
+            return InstrumentDetail(instrument.streamer_symbol, instrument, is_index=True)
 
         else:
             # Get equity instrument
@@ -423,9 +482,16 @@ async def get_quotes(
 
     session = get_session(ctx)
     instrument_details = await get_instrument_details(session, instruments)
+    streamer_symbols = [d.streamer_symbol for d in instrument_details]
+    index_symbols = {d.streamer_symbol for d in instrument_details if d.is_index}
 
-    quotes = await _stream_events(session, Quote, [d.streamer_symbol for d in instrument_details], timeout)
-    return to_table(quotes)
+    if index_symbols:
+        # Some indices (e.g., VIX) don't publish Quote events — only Trade.
+        # Subscribe to both and fall back to Trade for symbols without Quotes.
+        events = await _stream_quotes_with_trade_fallback(session, streamer_symbols, index_symbols, timeout)
+    else:
+        events = await _stream_events(session, Quote, streamer_symbols, timeout)
+    return to_table(events)
 
 
 @mcp_app.tool()
