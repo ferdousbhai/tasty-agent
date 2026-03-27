@@ -28,11 +28,12 @@ TastyTrade MCP server (Python/FastMCP). Exposes 9 tools for portfolio management
 ## Commands
 
 ```bash
-uv run tasty-agent              # stdio transport
-uv run tasty-agent sse          # SSE transport
+uv run tasty-agent                # stdio transport
+uv run tasty-agent sse            # SSE transport
 uv run tasty-agent streamable-http  # HTTP transport
-uv run chat.py                  # Interactive test client
-uv run pytest                   # Tests
+uv run pytest                     # Tests
+uv run examples/chat.py           # Interactive test client
+uv run examples/mcp_client.py     # Remote MCP client
 npx @modelcontextprotocol/inspector uvx tasty-agent  # MCP inspector
 ```
 
@@ -42,3 +43,10 @@ Requires `.env` or environment variables:
 - `TASTYTRADE_CLIENT_SECRET` (required)
 - `TASTYTRADE_REFRESH_TOKEN` (required)
 - `TASTYTRADE_ACCOUNT_ID` (optional, defaults to first account)
+
+## Examples
+
+- `examples/modal_deploy.py` — Deploy to Modal with proxy auth
+- `examples/mcp_client.py` — Python client for remote MCP server
+- `examples/chat.py` — Interactive chat via pydantic-ai
+- `examples/background.py` — Background trading bot with scheduling

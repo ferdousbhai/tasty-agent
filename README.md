@@ -44,18 +44,9 @@ A Model Context Protocol server for TastyTrade brokerage accounts. Enables LLMs 
 ### MCP Prompts
 - **IV Rank Analysis** - Automated prompt to analyze IV rank extremes across positions and watchlists for entry/exit opportunities
 
-## Key Features
+## Usage
 
-### Smart Order Placement
-- Automatic price calculation from real-time market quotes when no price specified
-- Multi-leg options strategies (spreads, strangles, etc.) with single function call
-- Dry-run mode for testing orders without execution
-
-### Rate Limiting & Reliability
-- Built-in rate limiting (2 requests/second) prevents API throttling
-- Comprehensive error handling and logging
-
-### MCP Client Configuration
+### Local (stdio)
 
 Add to your MCP client configuration (e.g., `claude_desktop_config.json`):
 ```json
@@ -74,30 +65,7 @@ Add to your MCP client configuration (e.g., `claude_desktop_config.json`):
 }
 ```
 
-## Examples
-
-```
-"Get my account balances and current positions"
-"Get my portfolio value history for the last 3 months"
-"Get real-time quotes for SPY and AAPL"
-"Get quotes for TQQQ C option with strike 100 expiring 2026-01-16"
-"Get Greeks for AAPL P option with strike 150 expiring 2024-12-20"
-"Buy 100 AAPL shares" (auto-pricing)
-"Buy 100 AAPL at $150"
-"Buy to open 17 TQQQ calls, strike 100, exp 2026-01-16"
-"Place a call spread: buy to open AAPL 150C and sell to open AAPL 155C, both exp 2024-12-20"
-"Close my AAPL position: sell to close 10 AAPL calls"
-"Modify order 12345 to price $10.05"
-"Cancel order 12345"
-"Show my live orders"
-"Get my trading history from January"
-"Get my order history for SPY"
-"Get my private watchlists"
-"Add TSLA and NVDA to my tech watchlist"
-"Remove AAPL from my tech watchlist"
-```
-
-## Remote Deployment (Modal)
+### Remote (Modal)
 
 Deploy as a remote MCP server on [Modal](https://modal.com) with proxy auth:
 
@@ -117,34 +85,57 @@ modal secret create tasty-agent-secrets \
 modal deploy examples/modal_deploy.py
 ```
 
-Clients authenticate with `Modal-Key` and `Modal-Secret` headers. See [`examples/modal_deploy.py`](examples/modal_deploy.py) for the full setup.
+Clients authenticate with `Modal-Key` and `Modal-Secret` headers. See [`examples/modal_deploy.py`](examples/modal_deploy.py).
+
+### Programmatic (Python client)
+
+Connect to a remote tasty-agent and call tools directly:
+
+```bash
+# List all tools
+uv run examples/mcp_client.py
+
+# Call a tool
+uv run examples/mcp_client.py market_status
+uv run examples/mcp_client.py get_market_metrics '{"symbols": ["AAPL", "SPY"]}'
+```
+
+See [`examples/mcp_client.py`](examples/mcp_client.py) for the full client code.
+
+## Examples
+
+```
+"Get my account balances and current positions"
+"Get my portfolio value history for the last 3 months"
+"Get real-time quotes for SPY and AAPL"
+"Get quotes for TQQQ C option with strike 100 expiring 2026-01-16"
+"Get Greeks for AAPL P option with strike 150 expiring 2024-12-20"
+"Buy 100 AAPL shares" (auto-pricing)
+"Buy 100 AAPL at $150"
+"Buy to open 17 TQQQ calls, strike 100, exp 2026-01-16"
+"Place a call spread: buy to open AAPL 150C and sell to open AAPL 155C, both exp 2024-12-20"
+"Modify order 12345 to price $10.05"
+"Cancel order 12345"
+"Show my live orders"
+"Get my trading history from January"
+"Get my order history for SPY"
+"Get my private watchlists"
+"Add TSLA and NVDA to my tech watchlist"
+```
 
 ## Development
 
-### Testing with chat.py
-
-For interactive testing during development:
 ```bash
-# Set up environment variables in .env file:
-# TASTYTRADE_CLIENT_SECRET=your_secret
-# TASTYTRADE_REFRESH_TOKEN=your_token
-# TASTYTRADE_ACCOUNT_ID=your_account_id (defaults to the first account)
-# OPENAI_API_KEY=your_openai_key (you can provide alternative provider of your choice as supported by pydantic-ai)
-# MODEL_IDENTIFIER=model_provider:model_name (defaults to openai:gpt-5-mini)
+# Run tests
+uv run pytest
 
+# Interactive chat client (requires .env with credentials + OPENAI_API_KEY)
+uv run examples/chat.py
 
-# Run the interactive client
-uv run chat.py
-```
+# Background trading bot
+uv run examples/background.py "Check portfolio and rebalance" --hourly
 
-The client provides a chat interface to test MCP tools directly. Example commands:
-- "Get my account balances"
-- "Get quote for SPY"
-- "Place dry-run order: buy 100 AAPL at $150"
-
-### Debug with MCP inspector
-
-```bash
+# Debug with MCP inspector
 npx @modelcontextprotocol/inspector uvx tasty-agent
 ```
 

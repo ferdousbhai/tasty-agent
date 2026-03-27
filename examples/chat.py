@@ -1,7 +1,7 @@
 import asyncio
 import logging
 
-from agent import create_tastytrader_agent
+from examples.agent import create_tastytrader_agent
 
 logger = logging.getLogger(__name__)
 

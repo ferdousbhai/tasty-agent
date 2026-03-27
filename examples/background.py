@@ -8,7 +8,7 @@ import typer
 from tastytrade.market_sessions import ExchangeType, MarketStatus, get_market_sessions
 from tastytrade.session import Session
 
-from agent import create_tastytrader_agent  # loads .env internally
+from examples.agent import create_tastytrader_agent  # loads .env internally
 
 logging.basicConfig(
     level=logging.INFO,
