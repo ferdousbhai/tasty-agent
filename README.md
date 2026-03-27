@@ -97,6 +97,28 @@ Add to your MCP client configuration (e.g., `claude_desktop_config.json`):
 "Remove AAPL from my tech watchlist"
 ```
 
+## Remote Deployment (Modal)
+
+Deploy as a remote MCP server on [Modal](https://modal.com) with proxy auth:
+
+```bash
+pip install modal && modal setup
+
+# Create secrets
+modal secret create tasty-agent-secrets \
+  TASTYTRADE_CLIENT_SECRET=your_secret \
+  TASTYTRADE_REFRESH_TOKEN=your_token
+
+# Create a proxy auth token at https://modal.com/settings/proxy-auth-tokens
+
+# Update MODAL_HOST in examples/modal_deploy.py with your workspace name
+
+# Deploy
+modal deploy examples/modal_deploy.py
+```
+
+Clients authenticate with `Modal-Key` and `Modal-Secret` headers. See [`examples/modal_deploy.py`](examples/modal_deploy.py) for the full setup.
+
 ## Development
 
 ### Testing with chat.py
