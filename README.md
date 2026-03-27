@@ -15,17 +15,17 @@ A Model Context Protocol server for TastyTrade brokerage accounts. Enables LLMs 
 ## MCP Tools
 
 ### Account & Portfolio
-- **`account_overview(include=["balances","positions"], time_back='1y')`** - Account balances, open positions, and/or portfolio value history in a single call. Set `include` to any combination of `"balances"`, `"positions"`, `"net_liq_history"`.
+- **`account_overview(include=["balances","positions"])`** - Account balances (including net liquidating value) and open positions.
 
 ### Market Data & Research
 - **`get_quotes(instruments, timeout=10.0)`** - Real-time quotes for stocks, options, futures, and indices via DXLink streaming
 - **`get_greeks(options, timeout=10.0)`** - Greeks (delta, gamma, theta, vega, rho) for options via DXLink streaming
 - **`get_market_metrics(symbols)`** - IV rank, percentile, beta, liquidity for multiple symbols
 - **`market_status(exchanges=['Equity'])`** - Market hours, status, holidays, and current NYC time ('Equity', 'CME', 'CFE', 'Smalls')
-- **`search_symbols(symbol)`** - Search for symbols by name/ticker
+- **`search_symbols(symbol, max_results=20)`** - Search for symbols by name/ticker
 
 ### History
-- **`get_history(type, days=None, underlying_symbol=None, transaction_type=None)`** - Transaction history (`type="transactions"`, default 90 days) or order history (`type="orders"`, default 7 days). Filter transactions by `"Trade"` or `"Money Movement"`.
+- **`get_history(type, days=None, underlying_symbol=None, transaction_type=None, page_offset=0, max_results=50)`** - Transaction history (`type="transactions"`, default 90 days) or order history (`type="orders"`, default 7 days). Paginated — use `page_offset` and `max_results` for large result sets. Filter transactions by `"Trade"` or `"Money Movement"`.
 
 ### Order Management
 - **`manage_order(action, ...)`** - Unified order management:
@@ -106,7 +106,7 @@ See [`examples/mcp_client.py`](examples/mcp_client.py) for the full client code.
 
 ```
 "Get my account balances and current positions"
-"Get my portfolio value history for the last 3 months"
+"What's my net liquidating value?"
 "Get real-time quotes for SPY and AAPL"
 "Get quotes for TQQQ C option with strike 100 expiring 2026-01-16"
 "Get Greeks for AAPL P option with strike 150 expiring 2024-12-20"

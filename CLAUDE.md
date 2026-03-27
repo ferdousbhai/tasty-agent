@@ -15,7 +15,7 @@ TastyTrade MCP server (Python/FastMCP). Exposes 9 tools for portfolio management
 
 | Tool | Purpose |
 |------|---------|
-| `account_overview` | Balances, positions, net liq history (concurrent fetch) |
+| `account_overview` | Balances (incl. net liq) and positions (concurrent fetch) |
 | `get_history` | Transaction or order history with pagination |
 | `manage_order` | Place/replace/cancel/list orders (auto-pricing from DXLink quotes) |
 | `get_quotes` | Live streaming quotes (stocks, options, futures, indices) |

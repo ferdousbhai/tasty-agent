@@ -1,7 +1,7 @@
 import asyncio
 import logging
 import os
-from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
@@ -190,22 +190,6 @@ async def _stream_quotes_with_trade_fallback(
             )
     return [events_by_symbol[s] for s in streamer_symbols]
 
-
-async def _paginate[T](
-    fetch_fn: Callable[[int], Awaitable[list[T]]],
-    page_size: int
-) -> list[T]:
-    """Generic pagination helper for API calls."""
-    all_items: list[T] = []
-    offset = 0
-    while True:
-        async with rate_limiter:
-            items = await fetch_fn(offset)
-        all_items.extend(items or [])
-        if not items or len(items) < page_size:
-            break
-        offset += page_size
-    return all_items
 
 
 def to_table(data: Sequence[BaseModel]) -> str:
@@ -468,18 +452,17 @@ async def calculate_net_price(ctx: Context, instrument_details: list[InstrumentD
 @mcp_app.tool()
 async def account_overview(
     ctx: Context,
-    include: list[Literal["balances", "positions", "net_liq_history"]] | None = None,
-    time_back: Literal['1d', '1m', '3m', '6m', '1y', 'all'] = '1y'
+    include: list[Literal["balances", "positions"]] | None = None,
 ) -> dict[str, Any]:
     """
-    Get account balances, open positions, and/or portfolio value history.
+    Get account balances and/or open positions.
 
     Args:
         include: Sections to return (default: ["balances", "positions"]).
-        time_back: Time range for net_liq_history (default: '1y'). Only used when 'net_liq_history' is included.
 
-    Note: Use get_history(type="transactions", transaction_type="Money Movement") to separate
-    trading performance from deposits/withdrawals when analyzing net_liq_history.
+    Balances include net_liquidating_value, cash_balance, buying_power, margin requirements, etc.
+    Use get_history(type="transactions", transaction_type="Money Movement") to separate
+    trading performance from deposits/withdrawals.
     """
     if include is None:
         include = ["balances", "positions"]
@@ -493,8 +476,6 @@ async def account_overview(
         tasks["balances"] = context.account.get_balances(session)
     if "positions" in include:
         tasks["positions"] = context.account.get_positions(session, include_marks=True)
-    if "net_liq_history" in include:
-        tasks["net_liq_history"] = context.account.get_net_liquidating_value_history(session, time_back=time_back)
 
     fetched = await asyncio.gather(*tasks.values())
     for key, value in zip(tasks.keys(), fetched):
@@ -502,8 +483,6 @@ async def account_overview(
             result["balances"] = {k: v for k, v in value.model_dump().items() if v is not None and v != 0}
         elif key == "positions":
             result["positions"] = to_table(value)
-        elif key == "net_liq_history":
-            result["net_liq_history"] = to_table(value)
 
     return result
 
@@ -514,39 +493,38 @@ async def get_history(
     type: Literal["transactions", "orders"],
     days: int | None = None,
     underlying_symbol: str | None = None,
-    transaction_type: Literal["Trade", "Money Movement"] | None = None
+    transaction_type: Literal["Trade", "Money Movement"] | None = None,
+    page_offset: int = 0,
+    max_results: int = 50,
 ) -> str:
     """
-    Get transaction or order history.
+    Get transaction or order history (paginated).
 
     Args:
         type: "transactions" for trade/cash flow history, "orders" for filled/canceled/rejected orders.
         days: Number of days to look back (default: 90 for transactions, 7 for orders).
         underlying_symbol: Filter by underlying symbol.
         transaction_type: Filter transactions by type (only for type="transactions").
+        page_offset: Starting offset for pagination (default: 0).
+        max_results: Maximum number of results to return (default: 50). Use with page_offset to paginate through large result sets.
     """
     context = get_context(ctx)
     session = context.session
     effective_days = days if days is not None else (90 if type == "transactions" else 7)
     start = date.today() - timedelta(days=effective_days)
 
-    if type == "transactions":
-        items = await _paginate(
-            lambda offset: context.account.get_history(
+    async with rate_limiter:
+        if type == "transactions":
+            items = await context.account.get_history(
                 session, start_date=start, underlying_symbol=underlying_symbol,
-                type=transaction_type, per_page=250, page_offset=offset
-            ),
-            page_size=250
-        )
-    else:
-        items = await _paginate(
-            lambda offset: context.account.get_order_history(
+                type=transaction_type, per_page=max_results, page_offset=page_offset
+            )
+        else:
+            items = await context.account.get_order_history(
                 session, start_date=start, underlying_symbol=underlying_symbol,
-                per_page=50, page_offset=offset
-            ),
-            page_size=50
-        )
-    return to_table(items)
+                per_page=max_results, page_offset=page_offset
+            )
+    return to_table(items or [])
 
 
 @mcp_app.tool()
@@ -765,12 +743,17 @@ async def market_status(ctx: Context, exchanges: list[Literal['Equity', 'CME', '
 
 
 @mcp_app.tool()
-async def search_symbols(ctx: Context, symbol: str) -> str:
-    """Search for symbols similar to the given search phrase."""
+async def search_symbols(ctx: Context, symbol: str, max_results: int = 20) -> str:
+    """Search for symbols similar to the given search phrase.
+
+    Args:
+        symbol: Search phrase (e.g., 'AAPL', 'Apple').
+        max_results: Maximum number of results to return (default: 20).
+    """
     session = get_session(ctx)
     async with rate_limiter:
         results = await symbol_search(session, symbol)
-    return to_table(results)
+    return to_table(results[:max_results])
 
 
 @mcp_app.tool()

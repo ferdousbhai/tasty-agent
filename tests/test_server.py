@@ -507,8 +507,9 @@ class TestQuoteNaNPatch:
         assert result[0].event_symbol == 'SPX'
         assert result[0].bid_price == Decimal('4122.49')
         assert result[0].ask_price == Decimal('4123.65')
-        assert result[0].bid_size is None
-        assert result[0].ask_size is None
+        # SDK converts NaN sizes to Decimal('0') rather than None
+        assert result[0].bid_size == Decimal('0')
+        assert result[0].ask_size == Decimal('0')
 
     def test_equity_quotes_still_parse(self):
         """Verify the NaN patch doesn't break normal equity quote parsing."""
