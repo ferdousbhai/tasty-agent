@@ -1,6 +1,6 @@
 # tasty-agent
 
-TastyTrade MCP server (Python/FastMCP). Exposes 9 tools for portfolio management, trading, and market data via Model Context Protocol.
+TastyTrade MCP server (Python/FastMCP). Exposes 10 tools for portfolio management, trading, and market data via Model Context Protocol.
 
 ## Architecture
 
@@ -20,6 +20,7 @@ TastyTrade MCP server (Python/FastMCP). Exposes 9 tools for portfolio management
 | `manage_order` | Place/replace/cancel/list orders (auto-pricing from DXLink quotes) |
 | `get_quotes` | Live streaming quotes (stocks, options, futures, indices) |
 | `get_greeks` | Streaming Greeks for options |
+| `get_gex` | Gamma exposure analysis (net GEX, flip level, call/put walls) |
 | `get_market_metrics` | IV rank, beta, liquidity, earnings |
 | `market_status` | Exchange hours, holidays, NYC time |
 | `search_symbols` | Symbol search |

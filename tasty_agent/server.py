@@ -17,7 +17,7 @@ from mcp.server.fastmcp.prompts.base import AssistantMessage, Message, UserMessa
 from pydantic import BaseModel, Field
 from tabulate import tabulate
 from tastytrade import Account, Session, metrics
-from tastytrade.dxfeed import Greeks, Quote, Trade
+from tastytrade.dxfeed import Greeks, Quote, Summary, Trade
 from tastytrade.instruments import Equity, Future, Option, get_option_chain
 from tastytrade.market_sessions import ExchangeType, MarketStatus, get_market_holidays, get_market_sessions
 from tastytrade.order import InstrumentType, NewOrder, OrderAction, OrderTimeInForce, OrderType
@@ -131,6 +131,75 @@ async def _stream_events(
             ValueError(f"Timeout getting quotes after {timeout}s. No data received for: {sorted(missing)}")
         )
     return [events_by_symbol[s] for s in streamer_symbols]
+
+
+async def _stream_multi_events(
+    session: Session,
+    event_types: list[type[Quote] | type[Greeks] | type[Summary]],
+    streamer_symbols: list[str],
+    timeout: float,
+) -> dict[type, dict[str, Any]]:
+    """Stream multiple event types concurrently on a single DXLink connection.
+
+    Returns a dict keyed by event type, each containing a dict of symbol → event.
+    Only symbols that received data within the timeout are included.
+    """
+    results: dict[type, dict[str, Any]] = {et: {} for et in event_types}
+    expected = set(streamer_symbols)
+    exchanges = _exchanges_for_symbols(streamer_symbols)
+    timed_out = False
+
+    def all_complete() -> bool:
+        return all(len(results[et]) >= len(expected) for et in event_types)
+
+    try:
+        async with DXLinkStreamer(session) as streamer:
+            for et in event_types:
+                await streamer.subscribe(et, streamer_symbols)
+            try:
+                async with asyncio.timeout(timeout):
+                    pending_tasks: dict[type, asyncio.Task] = {}
+                    while not all_complete():
+                        # Create tasks for event types still collecting
+                        for et in event_types:
+                            if et not in pending_tasks and len(results[et]) < len(expected):
+                                pending_tasks[et] = asyncio.ensure_future(streamer.get_event(et))
+
+                        done, _ = await asyncio.wait(
+                            pending_tasks.values(),
+                            return_when=asyncio.FIRST_COMPLETED,
+                        )
+                        for task in done:
+                            event = task.result()
+                            for et in event_types:
+                                if pending_tasks.get(et) is task:
+                                    if event.event_symbol in expected:
+                                        results[et][event.event_symbol] = event
+                                    del pending_tasks[et]
+                                    break
+            except TimeoutError:
+                timed_out = True
+            finally:
+                for task in pending_tasks.values():
+                    task.cancel()
+    except ExceptionGroup as eg:
+        errors = "; ".join(f"{type(e).__name__}: {e}" for e in eg.exceptions)
+        await _raise_with_market_context(
+            session, exchanges,
+            ValueError(f"Streaming connection error for {sorted(expected)}: {errors}")
+        )
+
+    if timed_out:
+        missing_info = {
+            et.__name__: sorted(expected - set(results[et]))
+            for et in event_types
+            if len(results[et]) < len(expected)
+        }
+        await _raise_with_market_context(
+            session, exchanges,
+            ValueError(f"Timeout after {timeout}s. Missing data: {missing_info}")
+        )
+    return results
 
 
 async def _stream_quotes_with_trade_fallback(
@@ -686,6 +755,109 @@ async def get_greeks(
 
     greeks = await _stream_events(session, Greeks, [d.streamer_symbol for d in option_details], timeout)
     return to_table(greeks)
+
+
+@mcp_app.tool()
+async def get_gex(
+    ctx: Context,
+    symbol: str,
+    expiration_date: str,
+    timeout: float = 60.0,
+) -> dict[str, Any]:
+    """
+    Get Gamma Exposure (GEX) analysis for an option chain.
+
+    Computes dealer gamma exposure per strike (gamma × OI × 100) and returns
+    key levels: net GEX, gamma regime, flip level, call/put walls, and top strikes.
+
+    Assumes standard dealer positioning: long calls (positive GEX), short puts (negative GEX).
+
+    Args:
+        symbol: Underlying symbol (e.g., 'SPY', 'SPX', 'AAPL').
+        expiration_date: Expiration date in YYYY-MM-DD format.
+        timeout: Timeout in seconds (default: 60). Large chains may need more time.
+    """
+    session = get_session(ctx)
+    target_date = validate_date_format(expiration_date)
+
+    chain = await get_cached_option_chain(session, symbol.upper())
+    if target_date not in chain:
+        available_dates = sorted(chain.keys())
+        raise ValueError(
+            f"No options for {symbol.upper()} expiration {expiration_date}. "
+            f"Available: {available_dates}"
+        )
+
+    options: list[Option] = chain[target_date]
+    streamer_symbols = [opt.streamer_symbol for opt in options]
+
+    if not streamer_symbols:
+        raise ValueError(f"No option contracts found for {symbol.upper()} {expiration_date}")
+
+    opt_by_sym = {opt.streamer_symbol: opt for opt in options}
+
+    # Stream Greeks + Summary concurrently on a single DXLink connection
+    data = await _stream_multi_events(session, [Greeks, Summary], streamer_symbols, timeout)
+    greeks_map = data[Greeks]
+    summary_map = data[Summary]
+
+    # Compute per-strike GEX: gamma × OI × 100 (positive for calls, negative for puts)
+    strike_gex: dict[float, float] = {}
+    for sym, opt in opt_by_sym.items():
+        gamma_event = greeks_map.get(sym)
+        summary_event = summary_map.get(sym)
+        if not gamma_event or not summary_event:
+            continue
+        gamma = float(gamma_event.gamma) if gamma_event.gamma is not None else 0.0
+        oi = summary_event.open_interest or 0
+        gex = gamma * oi * 100
+        strike = float(opt.strike_price)
+        # Calls: positive (dealers long), Puts: negative (dealers short)
+        if opt.option_type.value == "P":
+            gex = -gex
+        strike_gex[strike] = strike_gex.get(strike, 0.0) + gex
+
+    if not strike_gex:
+        raise ValueError(f"No GEX data available for {symbol.upper()} {expiration_date}")
+
+    net_gex = sum(strike_gex.values())
+
+    # GEX flip level: strike where cumulative GEX (ascending) crosses zero
+    sorted_strikes = sorted(strike_gex.items())
+    gex_flip_level = None
+    cumulative = 0.0
+    for i, (strike, gex) in enumerate(sorted_strikes):
+        prev_cumulative = cumulative
+        cumulative += gex
+        if i > 0 and prev_cumulative * cumulative < 0:
+            # Linear interpolation between the two strikes
+            prev_strike = sorted_strikes[i - 1][0]
+            gex_flip_level = prev_strike + (strike - prev_strike) * (-prev_cumulative / (cumulative - prev_cumulative))
+            break
+
+    # Call wall: strike with highest positive GEX
+    positive_strikes = {s: g for s, g in strike_gex.items() if g > 0}
+    call_wall = max(positive_strikes, key=positive_strikes.get) if positive_strikes else None
+
+    # Put wall: strike with most negative GEX
+    negative_strikes = {s: g for s, g in strike_gex.items() if g < 0}
+    put_wall = min(negative_strikes, key=negative_strikes.get) if negative_strikes else None
+
+    # Top strikes by absolute GEX
+    top = sorted(strike_gex.items(), key=lambda x: abs(x[1]), reverse=True)[:5]
+
+    result: dict[str, Any] = {
+        "net_gex": round(net_gex, 2),
+        "gamma_regime": "positive" if net_gex >= 0 else "negative",
+        "gex_flip_level": round(gex_flip_level, 2) if gex_flip_level is not None else None,
+    }
+    if call_wall is not None:
+        result["call_wall"] = {"strike": call_wall, "gex": round(positive_strikes[call_wall], 2)}
+    if put_wall is not None:
+        result["put_wall"] = {"strike": put_wall, "gex": round(negative_strikes[put_wall], 2)}
+    result["top_strikes"] = [{"strike": s, "gex": round(g, 2)} for s, g in top]
+
+    return result
 
 
 @mcp_app.tool()

@@ -20,6 +20,7 @@ A Model Context Protocol server for TastyTrade brokerage accounts. Enables LLMs 
 ### Market Data & Research
 - **`get_quotes(instruments, timeout=10.0)`** - Real-time quotes for stocks, options, futures, and indices via DXLink streaming
 - **`get_greeks(options, timeout=10.0)`** - Greeks (delta, gamma, theta, vega, rho) for options via DXLink streaming
+- **`get_gex(symbol, expiration_date, timeout=60.0)`** - Gamma Exposure analysis: net GEX, gamma regime, flip level, call/put walls, and top strikes
 - **`get_market_metrics(symbols)`** - IV rank, percentile, beta, liquidity for multiple symbols
 - **`market_status(exchanges=['Equity'])`** - Market hours, status, holidays, and current NYC time ('Equity', 'CME', 'CFE', 'Smalls')
 - **`search_symbols(symbol, max_results=20)`** - Search for symbols by name/ticker
@@ -110,6 +111,7 @@ See [`examples/mcp_client.py`](examples/mcp_client.py) for the full client code.
 "Get real-time quotes for SPY and AAPL"
 "Get quotes for TQQQ C option with strike 100 expiring 2026-01-16"
 "Get Greeks for AAPL P option with strike 150 expiring 2024-12-20"
+"Show GEX analysis for SPY options expiring 2026-04-03"
 "Buy 100 AAPL shares" (auto-pricing)
 "Buy 100 AAPL at $150"
 "Buy to open 17 TQQQ calls, strike 100, exp 2026-01-16"
