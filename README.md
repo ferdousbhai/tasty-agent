@@ -103,6 +103,10 @@ uv run examples/mcp_client.py get_market_metrics '{"symbols": ["AAPL", "SPY"]}'
 
 See [`examples/mcp_client.py`](examples/mcp_client.py) for the full client code.
 
+## Hosted deployment
+
+A hosted deployment is available on [Fronteir AI](https://fronteir.ai/mcp/ferdousbhai-tasty-agent).
+
 ## Examples
 
 ```
