@@ -489,7 +489,16 @@ def build_order_legs(instrument_details: list[InstrumentDetail], legs: list[Orde
         if isinstance(instrument, (Option, Future)):
             order_action = OrderAction(leg_spec.action)
         else:
-            order_action = OrderAction.BUY if leg_spec.action == 'Buy' else OrderAction.SELL
+            normalized_action = leg_spec.action.lower()
+            if normalized_action in {"buy", "buy to open", "buy to close"}:
+                order_action = OrderAction.BUY
+            elif normalized_action in {"sell", "sell to open", "sell to close"}:
+                order_action = OrderAction.SELL
+            else:
+                raise ValueError(
+                    f"Unsupported equity action '{leg_spec.action}'. "
+                    "Use Buy/Sell or opening/closing variants."
+                )
         built_legs.append(instrument.build_leg(Decimal(str(leg_spec.quantity)), order_action))
     return built_legs
 

@@ -157,6 +157,32 @@ class TestBuildOrderLegs:
         result = build_order_legs([], [])
         assert result == []
 
+    def test_equity_buy_to_open_maps_to_buy(self):
+        instrument = Mock(spec=[])
+        instrument.is_index = False
+        instrument.build_leg = Mock(return_value="built-leg")
+        detail = InstrumentDetail("SPY", instrument)
+        leg = OrderLeg(symbol="SPY", action="Buy to Open", quantity=10)
+
+        result = build_order_legs([detail], [leg])
+
+        assert result == ["built-leg"]
+        _, action = instrument.build_leg.call_args.args
+        assert action.value == "Buy"
+
+    def test_equity_sell_to_close_maps_to_sell(self):
+        instrument = Mock(spec=[])
+        instrument.is_index = False
+        instrument.build_leg = Mock(return_value="built-leg")
+        detail = InstrumentDetail("SPY", instrument)
+        leg = OrderLeg(symbol="SPY", action="Sell to Close", quantity=10)
+
+        result = build_order_legs([detail], [leg])
+
+        assert result == ["built-leg"]
+        _, action = instrument.build_leg.call_args.args
+        assert action.value == "Sell"
+
 
 class TestPydanticModels:
     """Tests for Pydantic model validation."""

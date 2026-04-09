@@ -18,6 +18,8 @@ from tastytrade.order import NewOrder, OrderAction, OrderTimeInForce, OrderType
 from tastytrade.search import symbol_search
 from tastytrade.utils import TastytradeError
 
+from tasty_agent.server import OrderLeg, build_order_legs, get_instrument_details
+
 pytestmark = pytest.mark.integration
 
 _client_secret = os.getenv("TASTYTRADE_CLIENT_SECRET")
@@ -134,3 +136,26 @@ async def test_dry_run_equity_order(session, account):
     except TastytradeError as e:
         # Validation errors (margin, price) are expected — they prove the API call works
         assert "margin" in str(e).lower() or "price" in str(e).lower() or "buy" in str(e).lower()
+
+
+@skip_no_creds
+async def test_dry_run_equity_buy_to_open_order_leg_mapping(session, account):
+    """Equity 'Buy to Open' should normalize to a BUY leg and pass dry-run validation."""
+    leg_spec = OrderLeg(symbol="AAPL", action="Buy to Open", quantity=1)
+    instrument_details = await get_instrument_details(session, [leg_spec.to_instrument_spec()])
+    built_legs = build_order_legs(instrument_details, [leg_spec])
+
+    order = NewOrder(
+        time_in_force=OrderTimeInForce.DAY,
+        order_type=OrderType.LIMIT,
+        legs=built_legs,
+        price=Decimal("-1.00"),
+    )
+    try:
+        response = await account.place_order(session, order, dry_run=True)
+        assert response is not None
+    except TastytradeError as e:
+        error_message = str(e).lower()
+        assert "short_sell_not_allowed" not in error_message
+        assert "short sell" not in error_message
+        assert "margin" in error_message or "price" in error_message or "buy" in error_message

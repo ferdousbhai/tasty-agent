@@ -21,6 +21,7 @@ A Model Context Protocol server for TastyTrade brokerage accounts. Enables LLMs 
 - **`get_quotes(instruments, timeout=10.0)`** - Real-time quotes for stocks, options, futures, and indices via DXLink streaming
 - **`get_greeks(options, timeout=10.0)`** - Greeks (delta, gamma, theta, vega, rho) for options via DXLink streaming
 - **`get_gex(symbol, expiration_date, timeout=60.0)`** - Gamma Exposure analysis: net GEX, gamma regime, flip level, call/put walls, and top strikes
+  - Intentionally returns compact analysis rather than raw full-chain per-strike data, to avoid oversized MCP responses on large option chains.
 - **`get_market_metrics(symbols)`** - IV rank, percentile, beta, liquidity for multiple symbols
 - **`market_status(exchanges=['Equity'])`** - Market hours, status, holidays, and current NYC time ('Equity', 'CME', 'CFE', 'Smalls')
 - **`search_symbols(symbol, max_results=20)`** - Search for symbols by name/ticker
