@@ -33,6 +33,7 @@ A Model Context Protocol server for TastyTrade brokerage accounts. Enables LLMs 
 - **`manage_order(action, ...)`** - Unified order management:
   - `action="list"` - Get all live orders
   - `action="place"` - Place multi-leg orders with automatic mid-price discovery. Supports `Day`, `GTC`, `GTD`, `Ext`, `Ext Overnight`, `GTC Ext`, `GTC Ext Overnight`, and `IOC` time-in-force.
+  - Order actions follow the tastytrade Python SDK contract: equities and options use `Buy to Open`, `Buy to Close`, `Sell to Open`, or `Sell to Close`; futures use `Buy` or `Sell`.
   - `action="replace"` - Modify existing order price
   - `action="cancel"` - Cancel an order
 
@@ -113,10 +114,11 @@ See [`examples/mcp_client.py`](examples/mcp_client.py) for the full client code.
 "Get quotes for TQQQ C option with strike 100 expiring 2026-01-16"
 "Get Greeks for AAPL P option with strike 150 expiring 2024-12-20"
 "Show GEX analysis for SPY options expiring 2026-04-03"
-"Buy 100 AAPL shares" (auto-pricing)
-"Buy 100 AAPL at $150"
+"Buy to open 100 AAPL shares" (auto-pricing)
+"Buy to open 100 AAPL at $150"
 "Buy to open 17 TQQQ calls, strike 100, exp 2026-01-16"
 "Place a call spread: buy to open AAPL 150C and sell to open AAPL 155C, both exp 2024-12-20"
+"Buy 1 /ESM26 future at 10.0 debit"
 "Modify order 12345 to price $10.05"
 "Cancel order 12345"
 "Show my live orders"

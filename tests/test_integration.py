@@ -140,8 +140,8 @@ async def test_dry_run_equity_order(session, account):
 
 @skip_no_creds
 async def test_dry_run_equity_buy_to_open_order_leg_mapping(session, account):
-    """Equity 'Buy to Open' should normalize to a BUY leg and pass dry-run validation."""
-    leg_spec = OrderLeg(symbol="AAPL", action="Buy to Open", quantity=1)
+    """Equity buys should use BUY_TO_OPEN and pass dry-run validation."""
+    leg_spec = OrderLeg(symbol="AAPL", action=OrderAction.BUY_TO_OPEN, quantity=1)
     instrument_details = await get_instrument_details(session, [leg_spec.to_instrument_spec()])
     built_legs = build_order_legs(instrument_details, [leg_spec])
 
@@ -156,6 +156,5 @@ async def test_dry_run_equity_buy_to_open_order_leg_mapping(session, account):
         assert response is not None
     except TastytradeError as e:
         error_message = str(e).lower()
-        assert "short_sell_not_allowed" not in error_message
-        assert "short sell" not in error_message
-        assert "margin" in error_message or "price" in error_message or "buy" in error_message
+        assert "order_legs.action" not in error_message
+        assert "margin" in error_message or "price" in error_message or "buy to open" in error_message

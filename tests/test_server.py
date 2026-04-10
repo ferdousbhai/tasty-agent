@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 from tastytrade.market_sessions import ExchangeType, MarketStatus
+from tastytrade.order import OrderAction
 
 from tasty_agent.server import (
     InstrumentDetail,
@@ -157,31 +158,31 @@ class TestBuildOrderLegs:
         result = build_order_legs([], [])
         assert result == []
 
-    def test_equity_buy_to_open_maps_to_buy(self):
+    @pytest.mark.parametrize(
+        ("symbol", "action", "expected_action", "option_fields"),
+        [
+            ("SPY", OrderAction.BUY_TO_OPEN, "Buy to Open", {}),
+            ("/ESM26", OrderAction.BUY, "Buy", {}),
+            (
+                "SPY",
+                OrderAction.BUY_TO_OPEN,
+                "Buy to Open",
+                {"option_type": "C", "strike_price": 500.0, "expiration_date": "2026-12-18"},
+            ),
+        ],
+    )
+    def test_build_order_legs_preserves_valid_action(self, symbol, action, expected_action, option_fields):
         instrument = Mock(spec=[])
         instrument.is_index = False
         instrument.build_leg = Mock(return_value="built-leg")
-        detail = InstrumentDetail("SPY", instrument)
-        leg = OrderLeg(symbol="SPY", action="Buy to Open", quantity=10)
+        detail = InstrumentDetail(symbol, instrument)
+        leg = OrderLeg(symbol=symbol, action=action, quantity=10, **option_fields)
 
         result = build_order_legs([detail], [leg])
 
         assert result == ["built-leg"]
-        _, action = instrument.build_leg.call_args.args
-        assert action.value == "Buy"
-
-    def test_equity_sell_to_close_maps_to_sell(self):
-        instrument = Mock(spec=[])
-        instrument.is_index = False
-        instrument.build_leg = Mock(return_value="built-leg")
-        detail = InstrumentDetail("SPY", instrument)
-        leg = OrderLeg(symbol="SPY", action="Sell to Close", quantity=10)
-
-        result = build_order_legs([detail], [leg])
-
-        assert result == ["built-leg"]
-        _, action = instrument.build_leg.call_args.args
-        assert action.value == "Sell"
+        _, built_action = instrument.build_leg.call_args.args
+        assert built_action.value == expected_action
 
 
 class TestPydanticModels:
@@ -206,23 +207,55 @@ class TestPydanticModels:
         assert spec.strike_price == 150.0
         assert spec.expiration_date == "2024-12-20"
 
-    def test_order_leg_stock(self):
-        leg = OrderLeg(symbol="AAPL", action="Buy", quantity=100)
-        assert leg.symbol == "AAPL"
-        assert leg.action == "Buy"
-        assert leg.quantity == 100
+    @pytest.mark.parametrize(
+        ("kwargs", "expected_action"),
+        [
+            ({"symbol": "AAPL", "action": OrderAction.BUY_TO_OPEN, "quantity": 100}, OrderAction.BUY_TO_OPEN),
+            (
+                {
+                    "symbol": "AAPL",
+                    "action": OrderAction.BUY_TO_OPEN,
+                    "quantity": 10,
+                    "option_type": "C",
+                    "strike_price": 150.0,
+                    "expiration_date": "2024-12-20",
+                },
+                OrderAction.BUY_TO_OPEN,
+            ),
+            ({"symbol": "/ESM26", "action": OrderAction.BUY, "quantity": 1}, OrderAction.BUY),
+        ],
+    )
+    def test_order_leg_accepts_valid_action_contract(self, kwargs, expected_action):
+        leg = OrderLeg(**kwargs)
+        assert leg.action == expected_action
 
-    def test_order_leg_option(self):
-        leg = OrderLeg(
-            symbol="AAPL",
-            action="Buy to Open",
-            quantity=10,
-            option_type="C",
-            strike_price=150.0,
-            expiration_date="2024-12-20"
-        )
-        assert leg.action == "Buy to Open"
-        assert leg.option_type == "C"
+    @pytest.mark.parametrize(
+        ("kwargs", "message"),
+        [
+            (
+                {"symbol": "AAPL", "action": OrderAction.BUY, "quantity": 100},
+                "Equities and options must use one of: Buy to Open, Buy to Close, Sell to Open, Sell to Close.",
+            ),
+            (
+                {
+                    "symbol": "AAPL",
+                    "action": OrderAction.BUY,
+                    "quantity": 10,
+                    "option_type": "C",
+                    "strike_price": 150.0,
+                    "expiration_date": "2024-12-20",
+                },
+                "Equities and options must use one of: Buy to Open, Buy to Close, Sell to Open, Sell to Close.",
+            ),
+            (
+                {"symbol": "/ESM26", "action": OrderAction.BUY_TO_OPEN, "quantity": 1},
+                "Futures must use 'Buy' or 'Sell'",
+            ),
+        ],
+    )
+    def test_order_leg_rejects_invalid_action_contract(self, kwargs, message):
+        with pytest.raises(ValueError, match=message):
+            OrderLeg(**kwargs)
 
     def test_watchlist_symbol(self):
         ws = WatchlistSymbol(symbol="AAPL", instrument_type="Equity")
@@ -277,8 +310,8 @@ class TestStreamEvents:
             await asyncio.sleep(999)
         mock_streamer.get_event = block_forever
 
-        with patch("tasty_agent.server.DXLinkStreamer", return_value=mock_streamer), \
-             patch("tasty_agent.server._market_status_message", return_value=None):
+        with patch("tasty_agent.market_data.DXLinkStreamer", return_value=mock_streamer), \
+             patch("tasty_agent.market_data.market_status_message", return_value=None):
             with pytest.raises(ValueError, match="Timeout getting quotes after"):
                 from tastytrade.dxfeed import Quote
                 await _stream_events(mock_session, Quote, ["AAPL"], timeout=0.1)
@@ -308,7 +341,7 @@ class TestStreamEvents:
         mock_streamer.subscribe = AsyncMock()
         mock_streamer.get_event = fake_get_event
 
-        with patch("tasty_agent.server.DXLinkStreamer", return_value=mock_streamer):
+        with patch("tasty_agent.market_data.DXLinkStreamer", return_value=mock_streamer):
             from tastytrade.dxfeed import Quote
             result = await _stream_events(mock_session, Quote, ["AAPL", "TSLA"], timeout=5.0)
 
@@ -328,8 +361,8 @@ class TestStreamEvents:
         mock_streamer.__aenter__ = AsyncMock(side_effect=failing_context)
         mock_streamer.__aexit__ = AsyncMock(return_value=False)
 
-        with patch("tasty_agent.server.DXLinkStreamer", return_value=mock_streamer), \
-             patch("tasty_agent.server._market_status_message", return_value=None):
+        with patch("tasty_agent.market_data.DXLinkStreamer", return_value=mock_streamer), \
+             patch("tasty_agent.market_data.market_status_message", return_value=None):
             with pytest.raises(ValueError, match="Streaming connection error"):
                 from tastytrade.dxfeed import Quote
                 await _stream_events(mock_session, Quote, ["SPX"], timeout=5.0)
@@ -350,8 +383,8 @@ class TestStreamEvents:
 
         market_msg = "Market is currently closed: Equity (opens in 14 hours). Live quotes are not available while the market is closed."
 
-        with patch("tasty_agent.server.DXLinkStreamer", return_value=mock_streamer), \
-             patch("tasty_agent.server._market_status_message", return_value=market_msg):
+        with patch("tasty_agent.market_data.DXLinkStreamer", return_value=mock_streamer), \
+             patch("tasty_agent.market_data.market_status_message", return_value=market_msg):
             with pytest.raises(ValueError, match="Market is currently closed"):
                 from tastytrade.dxfeed import Quote
                 await _stream_events(mock_session, Quote, ["AAPL"], timeout=0.1)
@@ -372,8 +405,8 @@ class TestStreamEvents:
 
         market_msg = "Market is currently closed: CFE (closed). Live quotes are not available while the market is closed."
 
-        with patch("tasty_agent.server.DXLinkStreamer", return_value=mock_streamer), \
-             patch("tasty_agent.server._market_status_message", return_value=market_msg):
+        with patch("tasty_agent.market_data.DXLinkStreamer", return_value=mock_streamer), \
+             patch("tasty_agent.market_data.market_status_message", return_value=market_msg):
             with pytest.raises(ValueError, match="Market is currently closed"):
                 from tastytrade.dxfeed import Quote
                 await _stream_events(mock_session, Quote, ["/VXJ26:XCBF"], timeout=5.0)
@@ -407,7 +440,7 @@ class TestStreamQuotesWithTradeFallback:
         mock_streamer.subscribe = AsyncMock()
         mock_streamer.get_event = fake_get_event
 
-        with patch("tasty_agent.server.DXLinkStreamer", return_value=mock_streamer):
+        with patch("tasty_agent.market_data.DXLinkStreamer", return_value=mock_streamer):
             result = await _stream_quotes_with_trade_fallback(
                 mock_session, ["AAPL", "VIX"], {"VIX"}, timeout=5.0
             )
@@ -445,7 +478,7 @@ class TestStreamQuotesWithTradeFallback:
         mock_streamer.subscribe = AsyncMock()
         mock_streamer.get_event = fake_get_event
 
-        with patch("tasty_agent.server.DXLinkStreamer", return_value=mock_streamer):
+        with patch("tasty_agent.market_data.DXLinkStreamer", return_value=mock_streamer):
             result = await _stream_quotes_with_trade_fallback(
                 mock_session, ["SPX"], {"SPX"}, timeout=5.0
             )
@@ -483,7 +516,7 @@ class TestStreamQuotesWithTradeFallback:
         mock_streamer.subscribe = AsyncMock()
         mock_streamer.get_event = fake_get_event
 
-        with patch("tasty_agent.server.DXLinkStreamer", return_value=mock_streamer):
+        with patch("tasty_agent.market_data.DXLinkStreamer", return_value=mock_streamer):
             result = await _stream_quotes_with_trade_fallback(
                 mock_session,
                 ["AAPL", "/ESM26:XCME", "VIX"],
@@ -507,8 +540,8 @@ class TestStreamQuotesWithTradeFallback:
         mock_streamer.subscribe = AsyncMock()
         mock_streamer.get_event = block_forever
 
-        with patch("tasty_agent.server.DXLinkStreamer", return_value=mock_streamer), \
-             patch("tasty_agent.server._market_status_message", return_value=None):
+        with patch("tasty_agent.market_data.DXLinkStreamer", return_value=mock_streamer), \
+             patch("tasty_agent.market_data.market_status_message", return_value=None):
             with pytest.raises(ValueError, match="Timeout getting quotes after"):
                 await _stream_quotes_with_trade_fallback(
                     mock_session, ["VIX"], {"VIX"}, timeout=0.1
