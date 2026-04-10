@@ -14,7 +14,12 @@ Setup:
 
     3. Create a proxy auth token at https://modal.com/settings/proxy-auth-tokens
 
-    4. Update MODAL_HOST below with your workspace name.
+    4. Export your Modal host:
+       export MODAL_HOST=<workspace>--tasty-agent-mcp-server.modal.run
+
+       Optional overrides:
+       export TASTY_AGENT_VERSION=4.1.2
+       export TASTY_AGENT_SECRET_NAME=tasty-agent-secrets
 
     5. Deploy:
        modal deploy examples/modal_deploy.py
@@ -28,21 +33,26 @@ Dev (ephemeral, hot-reload):
     modal serve examples/modal_deploy.py
 """
 
+import os
+
 import modal
 
-app = modal.App("tasty-agent")
+APP_NAME = os.environ.get("MODAL_APP_NAME", "tasty-agent")
+PACKAGE_VERSION = os.environ.get("TASTY_AGENT_VERSION")
+PACKAGE_SPEC = f"tasty-agent=={PACKAGE_VERSION}" if PACKAGE_VERSION else "tasty-agent"
+SECRET_NAME = os.environ.get("TASTY_AGENT_SECRET_NAME", "tasty-agent-secrets")
+MODAL_HOST = os.environ.get("MODAL_HOST", "ai-clone-company--tasty-agent-mcp-server.modal.run")
+
+app = modal.App(APP_NAME)
 
 image = modal.Image.debian_slim(python_version="3.12").pip_install(
-    "tasty-agent>=4.0.0",
+    PACKAGE_SPEC,
 )
-
-# Replace with your Modal workspace name
-MODAL_HOST = "YOUR_WORKSPACE--tasty-agent-mcp-server.modal.run"
 
 
 @app.function(
     image=image,
-    secrets=[modal.Secret.from_name("tasty-agent-secrets")],
+    secrets=[modal.Secret.from_name(SECRET_NAME)],
 )
 @modal.asgi_app(requires_proxy_auth=True)
 def mcp_server():
