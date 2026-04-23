@@ -19,6 +19,7 @@ from tasty_agent.server import (
     _stream_events,
     _stream_quotes_with_trade_fallback,
     build_order_legs,
+    market_status,
     to_table,
     validate_date_format,
     validate_strike_price,
@@ -142,6 +143,35 @@ class TestGetNextOpenTime:
 
         result = _get_next_open_time(mock_session, datetime.now(UTC))
         assert result is None
+
+
+class TestMarketStatusTool:
+    """Tests for the market_status MCP tool."""
+
+    @pytest.mark.asyncio
+    async def test_market_status_returns_structured_exchange_status(self):
+        mock_ctx = Mock()
+        mock_ctx.request_context = Mock()
+        mock_ctx.request_context.lifespan_context = Mock(session=Mock())
+
+        mock_market_session = Mock()
+        mock_market_session.instrument_collection = "Equity"
+        mock_market_session.status = MarketStatus.OPEN
+        mock_market_session.close_at = datetime(2026, 4, 23, 20, 0, tzinfo=UTC)
+
+        mock_calendar = Mock(holidays=set(), half_days=set())
+
+        with patch("tasty_agent.server.get_market_sessions", new=AsyncMock(return_value=[mock_market_session])), \
+             patch("tasty_agent.server.get_market_holidays", new=AsyncMock(return_value=mock_calendar)), \
+             patch("tasty_agent.server.now_in_new_york", return_value=datetime(2026, 4, 23, 9, 30, tzinfo=UTC)):
+            result = await market_status(mock_ctx, ["Equity"])
+
+        assert result["current_time_nyc"] == "2026-04-23T09:30:00+00:00"
+        assert result["exchanges"] == [{
+            "exchange": "Equity",
+            "status": "Open",
+            "close_at": "2026-04-23T20:00:00+00:00",
+        }]
 
 
 class TestBuildOrderLegs:

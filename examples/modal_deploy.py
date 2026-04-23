@@ -39,15 +39,21 @@ import modal
 
 APP_NAME = os.environ.get("MODAL_APP_NAME", "tasty-agent")
 PACKAGE_VERSION = os.environ.get("TASTY_AGENT_VERSION")
-PACKAGE_SPEC = f"tasty-agent=={PACKAGE_VERSION}" if PACKAGE_VERSION else "tasty-agent"
 SECRET_NAME = os.environ.get("TASTY_AGENT_SECRET_NAME", "tasty-agent-secrets")
 MODAL_HOST = os.environ.get("MODAL_HOST", "ai-clone-company--tasty-agent-mcp-server.modal.run")
 
 app = modal.App(APP_NAME)
 
-image = modal.Image.debian_slim(python_version="3.12").pip_install(
-    PACKAGE_SPEC,
-)
+base_image = modal.Image.debian_slim(python_version="3.12")
+
+if PACKAGE_VERSION:
+    image = base_image.pip_install(f"tasty-agent=={PACKAGE_VERSION}")
+else:
+    image = (
+        base_image
+        .pip_install_from_pyproject("pyproject.toml")
+        .add_local_python_source("tasty_agent")
+    )
 
 
 @app.function(
