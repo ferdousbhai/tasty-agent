@@ -11,11 +11,7 @@ from tastytrade.session import Session
 from examples.agent import create_tastytrader_agent  # loads .env internally
 
 logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler()
-    ]
+    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s", handlers=[logging.StreamHandler()]
 )
 logger = logging.getLogger(__name__)
 
@@ -35,7 +31,10 @@ async def check_market_open() -> bool:
         logger.warning(f"Failed to check market status: {e}. Proceeding with agent run.")
         return True
 
-async def run_background_agent(instructions: str, period: int | None = None, schedule: datetime | None = None, market_open_only: bool = True):
+
+async def run_background_agent(
+    instructions: str, period: int | None = None, schedule: datetime | None = None, market_open_only: bool = True
+):
     if schedule:
         sleep_seconds = (schedule - datetime.now()).total_seconds()
         if sleep_seconds > 0:
@@ -66,17 +65,25 @@ async def run_background_agent(instructions: str, period: int | None = None, sch
             result = await agent.run(instructions)
             print(f"🤖 {result.output}")
 
+
 app = typer.Typer(help="Tasty Agent - Background Trading Bot")
+
 
 @app.command()
 def main(
     instructions: str = typer.Argument(..., help="Instructions for the agent"),
-    schedule: str | None = typer.Option(None, "--schedule", "-s", help="Schedule time (e.g., '9:30am') in NYC timezone"),
-    period: int | None = typer.Option(None, "--period", "-p", help="Period in seconds between runs (e.g., 1800 for 30min, 3600 for 1hr)"),
+    schedule: str | None = typer.Option(
+        None, "--schedule", "-s", help="Schedule time (e.g., '9:30am') in NYC timezone"
+    ),
+    period: int | None = typer.Option(
+        None, "--period", "-p", help="Period in seconds between runs (e.g., 1800 for 30min, 3600 for 1hr)"
+    ),
     hourly: bool = typer.Option(False, "--hourly", help="Run every hour (shorthand for --period 3600)"),
     daily: bool = typer.Option(False, "--daily", help="Run every day (shorthand for --period 86400)"),
-    market_open: bool = typer.Option(False, "--market-open", help="Schedule for market open (shorthand for --schedule '9:30am')"),
-    ignore_market_hours: bool = typer.Option(False, "--ignore-market-hours", help="Run even when markets are closed")
+    market_open: bool = typer.Option(
+        False, "--market-open", help="Schedule for market open (shorthand for --schedule '9:30am')"
+    ),
+    ignore_market_hours: bool = typer.Option(False, "--ignore-market-hours", help="Run even when markets are closed"),
 ):
     # Handle schedule parsing
     schedule_time = None
@@ -88,8 +95,8 @@ def main(
         schedule_str = None
 
     if schedule_str:
-        nyc_tz = ZoneInfo('America/New_York')
-        for fmt in ('%I:%M%p', '%H:%M'):
+        nyc_tz = ZoneInfo("America/New_York")
+        for fmt in ("%I:%M%p", "%H:%M"):
             try:
                 parsed_time = datetime.strptime(schedule_str.lower(), fmt).time()
                 break
@@ -112,7 +119,12 @@ def main(
     final_period = 3600 if hourly else 86400 if daily else period
 
     # Execute with period and/or schedule
-    asyncio.run(run_background_agent(instructions, period=final_period, schedule=schedule_time, market_open_only=not ignore_market_hours))
+    asyncio.run(
+        run_background_agent(
+            instructions, period=final_period, schedule=schedule_time, market_open_only=not ignore_market_hours
+        )
+    )
+
 
 if __name__ == "__main__":
     app()

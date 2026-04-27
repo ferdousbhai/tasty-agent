@@ -103,15 +103,15 @@ async def stream_events(
     except ExceptionGroup as eg:
         errors = "; ".join(f"{type(e).__name__}: {e}" for e in eg.exceptions)
         await raise_with_market_context(
-            session, exchanges,
-            ValueError(f"Streaming connection error for {sorted(expected)}: {errors}")
+            session, exchanges, ValueError(f"Streaming connection error for {sorted(expected)}: {errors}")
         )
 
     if timed_out:
         missing = expected - set(events_by_symbol)
         await raise_with_market_context(
-            session, exchanges,
-            ValueError(f"Timeout getting quotes after {timeout}s. No data received for: {sorted(missing)}")
+            session,
+            exchanges,
+            ValueError(f"Timeout getting quotes after {timeout}s. No data received for: {sorted(missing)}"),
         )
     return [events_by_symbol[s] for s in streamer_symbols]
 
@@ -163,19 +163,15 @@ async def stream_multi_events(
     except ExceptionGroup as eg:
         errors = "; ".join(f"{type(e).__name__}: {e}" for e in eg.exceptions)
         await raise_with_market_context(
-            session, exchanges,
-            ValueError(f"Streaming connection error for {sorted(expected)}: {errors}")
+            session, exchanges, ValueError(f"Streaming connection error for {sorted(expected)}: {errors}")
         )
 
     if timed_out:
         missing_info = {
-            et.__name__: sorted(expected - set(results[et]))
-            for et in event_types
-            if len(results[et]) < len(expected)
+            et.__name__: sorted(expected - set(results[et])) for et in event_types if len(results[et]) < len(expected)
         }
         await raise_with_market_context(
-            session, exchanges,
-            ValueError(f"Timeout after {timeout}s. Missing data: {missing_info}")
+            session, exchanges, ValueError(f"Timeout after {timeout}s. Missing data: {missing_info}")
         )
     return results
 
@@ -217,14 +213,14 @@ async def stream_quotes_with_trade_fallback(
     except ExceptionGroup as eg:
         errors = "; ".join(f"{type(e).__name__}: {e}" for e in eg.exceptions)
         await raise_with_market_context(
-            session, exchanges,
-            ValueError(f"Streaming connection error for {sorted(expected)}: {errors}")
+            session, exchanges, ValueError(f"Streaming connection error for {sorted(expected)}: {errors}")
         )
 
     if timed_out:
         missing = expected - set(events_by_symbol)
         await raise_with_market_context(
-            session, exchanges,
-            ValueError(f"Timeout getting quotes after {timeout}s. No data received for: {sorted(missing)}")
+            session,
+            exchanges,
+            ValueError(f"Timeout getting quotes after {timeout}s. No data received for: {sorted(missing)}"),
         )
     return [events_by_symbol[s] for s in streamer_symbols]

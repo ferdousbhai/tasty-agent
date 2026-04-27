@@ -24,22 +24,24 @@ A Model Context Protocol server for TastyTrade brokerage accounts. Enables LLMs 
   - Intentionally returns compact analysis rather than raw full-chain per-strike data, to avoid oversized MCP responses on large option chains.
 - **`get_market_metrics(symbols)`** - IV rank, percentile, beta, liquidity for multiple symbols
 - **`market_status(exchanges=['Equity'])`** - Market hours, status, holidays, and current NYC time ('Equity', 'CME', 'CFE', 'Smalls')
-- **`search_symbols(symbol, max_results=20)`** - Search for symbols by name/ticker
+- **`search_symbols(symbol, limit=10)`** - Search for symbols by name/ticker
 
 ### History
-- **`get_history(type, days=None, underlying_symbol=None, transaction_type=None, page_offset=0, max_results=50)`** - Transaction history (`type="transactions"`, default 90 days) or order history (`type="orders"`, default 7 days). Paginated — use `page_offset` and `max_results` for large result sets. Filter transactions by `"Trade"` or `"Money Movement"`.
+- **`get_history(type, days=None, underlying_symbol=None, transaction_type=None, page_offset=0, limit=25)`** - Transaction history (`type="transactions"`, default 90 days) or order history (`type="orders"`, default 7 days). Paginated — use `page_offset` and `limit` for large result sets. Filter transactions by `"Trade"` or `"Money Movement"`.
 
 ### Order Management
-- **`manage_order(action, ...)`** - Unified order management:
-  - `action="list"` - Get all live orders
-  - `action="place"` - Place multi-leg orders with automatic mid-price discovery. Supports `Day`, `GTC`, `GTD`, `Ext`, `Ext Overnight`, `GTC Ext`, `GTC Ext Overnight`, and `IOC` time-in-force.
+- **`place_order(legs, target_value=None, chase=true, time_in_force="Day", dry_run=false)`** - Place multi-leg orders with quote-derived mid pricing only. The tool fetches live quotes for the exact resolved instruments, computes the signed net mid, validates the final limit against bid/ask guardrails, and optionally sizes quantity from `target_value`.
+  - `target_value=50000` sizes an equity or equity-option order from quote-derived pricing. With `target_value`, leg `quantity` is a ratio and usually omitted/defaults to `1`.
+  - `chase=true` enables bounded repricing after placement: wait 10 seconds, check whether the order is still live, then recalculate from fresh exact-instrument quotes and move 1 valid price tick closer to fill. Defaults are 10 seconds, 10 reprices max, 1 tick per reprice.
   - Order actions follow the tastytrade Python SDK contract: equities and options use `Buy to Open`, `Buy to Close`, `Sell to Open`, or `Sell to Close`; futures use `Buy` or `Sell`.
-  - `action="replace"` - Modify existing order price
-  - `action="cancel"` - Cancel an order
+- **`replace_order(order_id)`** - Reprice an existing live order at the current quote-derived mid.
+- **`cancel_order(order_id)`** - Cancel an order.
+- **`list_orders()`** - Get all live orders.
+- Tool outputs are compact: quote tables include actionable bid/ask/mid/size fields; order results include compact order, buying-power, fee, warning/error, chase, and sizing summaries.
 
 ### Watchlist Management
 - **`watchlist(action, ...)`** - Unified watchlist management:
-  - `action="list"` - Get public or private watchlists
+  - `action="list"` - No `name` returns compact watchlist metadata (`name`, `group`, `symbol_count`); with `name`, returns compact symbol entries.
   - `action="add"` - Add symbols to a watchlist (creates if doesn't exist)
   - `action="remove"` - Remove symbols from a watchlist
   - `action="delete"` - Delete a watchlist
@@ -123,12 +125,13 @@ See [`examples/mcp_client.py`](examples/mcp_client.py) for the full client code.
 "Get quotes for TQQQ C option with strike 100 expiring 2026-01-16"
 "Get Greeks for AAPL P option with strike 150 expiring 2024-12-20"
 "Show GEX analysis for SPY options expiring 2026-04-03"
-"Buy to open 100 AAPL shares" (auto-pricing)
-"Buy to open 100 AAPL at $150"
+"Buy to open 100 AAPL shares at mid"
 "Buy to open 17 TQQQ calls, strike 100, exp 2026-01-16"
+"Buy $50K of TSLA calls, strike 300, exp 2026-01-16"
+"Buy TSLA calls, strike 300, exp 2026-01-16, and chase if not filled"
 "Place a call spread: buy to open AAPL 150C and sell to open AAPL 155C, both exp 2024-12-20"
-"Buy 1 /ESM26 future at 10.0 debit"
-"Modify order 12345 to price $10.05"
+"Buy 1 /ESM26 future at mid"
+"Reprice order 12345 at mid"
 "Cancel order 12345"
 "Show my live orders"
 "Get my trading history from January"

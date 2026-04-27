@@ -8,15 +8,18 @@ from pydantic import BaseModel, Field
 from tastytrade.order import InstrumentType
 from tastytrade.watchlists import PrivateWatchlist, PublicWatchlist
 
-from tasty_agent.core import get_session
+from tasty_agent.core import compact_row, get_session
 
 logger = logging.getLogger(__name__)
 
 
 class WatchlistSymbol(BaseModel):
     """Symbol specification for watchlist operations."""
+
     symbol: str = Field(..., description="Stock symbol (e.g., 'AAPL', 'TSLA')")
-    instrument_type: Literal['Equity', 'Equity Option', 'Future', 'Future Option', 'Cryptocurrency', 'Warrant'] = Field(..., description="Instrument type")
+    instrument_type: Literal["Equity", "Equity Option", "Future", "Future Option", "Cryptocurrency", "Warrant"] = Field(
+        ..., description="Instrument type"
+    )
 
 
 def _symbol_list(symbols: list[WatchlistSymbol]) -> str:
@@ -29,10 +32,29 @@ def _watchlist_entries(symbols: list[WatchlistSymbol]) -> list[dict[str, str]]:
     return [{"symbol": s.symbol, "instrument_type": s.instrument_type} for s in symbols]
 
 
+def _compact_watchlist(watchlist, *, include_symbols: bool) -> dict[str, Any]:
+    """Return watchlist metadata with compact symbol entries."""
+    data = watchlist.model_dump()
+    entries = data.get("watchlist_entries") or []
+    symbols = []
+    for entry in entries:
+        symbol = entry.get("symbol")
+        instrument_type = entry.get("instrument_type")
+        symbols.append(f"{symbol}:{instrument_type}" if instrument_type else symbol)
+    result: dict[str, Any] = {
+        "name": data.get("name"),
+        "group": data.get("group_name"),
+        "symbol_count": len(symbols),
+    }
+    if include_symbols:
+        result["symbols"] = symbols
+    return compact_row(result)
+
+
 async def manage_watchlist(
     ctx: Context,
     action: Literal["list", "add", "remove", "delete"],
-    watchlist_type: Literal['public', 'private'] = 'private',
+    watchlist_type: Literal["public", "private"] = "private",
     name: str | None = None,
     symbols: list[WatchlistSymbol] | None = None,
 ) -> list[dict[str, Any]] | dict[str, Any]:
@@ -42,8 +64,10 @@ async def manage_watchlist(
     if action == "list":
         watchlist_class = PublicWatchlist if watchlist_type == "public" else PrivateWatchlist
         if name:
-            return [(await watchlist_class.get(session, name)).model_dump()]
-        return [watchlist.model_dump() for watchlist in await watchlist_class.get(session)]
+            return _compact_watchlist(await watchlist_class.get(session, name), include_symbols=True)
+        return [
+            _compact_watchlist(watchlist, include_symbols=False) for watchlist in await watchlist_class.get(session)
+        ]
 
     effective_name = name or "main"
 

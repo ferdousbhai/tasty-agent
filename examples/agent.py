@@ -11,10 +11,8 @@ load_dotenv()
 
 def create_tastytrader_agent() -> Agent:
     """Create and return a configured agent instance."""
-    model_identifier = os.getenv('MODEL_IDENTIFIER', 'openai:gpt-5-mini')
+    model_identifier = os.getenv("MODEL_IDENTIFIER", "openai:gpt-5-mini")
     logger.info(f"Creating agent with model: {model_identifier}")
 
-    server = MCPServerStdio(
-        'uv', args=['run', 'tasty-agent', 'stdio'], timeout=60, env=dict(os.environ)
-    )
+    server = MCPServerStdio("uv", args=["run", "tasty-agent", "stdio"], timeout=60, env=dict(os.environ))
     return Agent(model_identifier, toolsets=[server])

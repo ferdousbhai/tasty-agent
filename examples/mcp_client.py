@@ -38,23 +38,25 @@ async def main():
         headers["Modal-Key"] = MODAL_KEY
         headers["Modal-Secret"] = MODAL_SECRET
 
-    async with streamablehttp_client(MCP_URL, headers=headers) as (read, write, _):
-        async with ClientSession(read, write) as session:
-            await session.initialize()
+    async with (
+        streamablehttp_client(MCP_URL, headers=headers) as (read, write, _),
+        ClientSession(read, write) as session,
+    ):
+        await session.initialize()
 
-            tool_name = sys.argv[1] if len(sys.argv) > 1 else None
-            tool_args = json.loads(sys.argv[2]) if len(sys.argv) > 2 else {}
+        tool_name = sys.argv[1] if len(sys.argv) > 1 else None
+        tool_args = json.loads(sys.argv[2]) if len(sys.argv) > 2 else {}
 
-            if not tool_name:
-                tools = await session.list_tools()
-                print(f"{len(tools.tools)} tools available:\n")
-                for t in tools.tools:
-                    print(f"  {t.name}: {t.description[:80]}")
-                return
+        if not tool_name:
+            tools = await session.list_tools()
+            print(f"{len(tools.tools)} tools available:\n")
+            for t in tools.tools:
+                print(f"  {t.name}: {t.description[:80]}")
+            return
 
-            result = await session.call_tool(tool_name, tool_args)
-            for item in result.content:
-                print(item.text if hasattr(item, "text") else item)
+        result = await session.call_tool(tool_name, tool_args)
+        for item in result.content:
+            print(item.text if hasattr(item, "text") else item)
 
 
 if __name__ == "__main__":

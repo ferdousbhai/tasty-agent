@@ -49,11 +49,7 @@ base_image = modal.Image.debian_slim(python_version="3.12")
 if PACKAGE_VERSION:
     image = base_image.pip_install(f"tasty-agent=={PACKAGE_VERSION}")
 else:
-    image = (
-        base_image
-        .pip_install_from_pyproject("pyproject.toml")
-        .add_local_python_source("tasty_agent")
-    )
+    image = base_image.pip_install_from_pyproject("pyproject.toml").add_local_python_source("tasty_agent")
 
 
 @app.function(

@@ -5,7 +5,7 @@ from examples.agent import create_tastytrader_agent
 
 logger = logging.getLogger(__name__)
 
-EXIT_COMMANDS = {'quit', 'exit', 'q'}
+EXIT_COMMANDS = {"quit", "exit", "q"}
 
 
 async def main() -> None:
