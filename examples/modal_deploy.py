@@ -4,10 +4,10 @@ Exposes the tasty-agent MCP server over streamable HTTP so it can be
 consumed by any MCP client (Claude Desktop, CF Workers, etc.).
 
 Setup:
-    1. pip install modal && modal setup
+    1. uvx modal setup
 
     2. Create a Modal secret named "tasty-agent-secrets":
-       modal secret create tasty-agent-secrets \\
+       uvx modal secret create tasty-agent-secrets \\
          TASTYTRADE_CLIENT_SECRET=your_secret \\
          TASTYTRADE_REFRESH_TOKEN=your_token \\
          TASTYTRADE_ACCOUNT_ID=your_account_id
@@ -22,7 +22,7 @@ Setup:
        export TASTY_AGENT_SECRET_NAME=tasty-agent-secrets
 
     5. Deploy:
-       modal deploy examples/modal_deploy.py
+       uvx modal deploy examples/modal_deploy.py
 
     6. The MCP endpoint will be at:
        https://<workspace>--tasty-agent-mcp-server.modal.run/mcp
@@ -30,7 +30,7 @@ Setup:
        Clients must include Modal-Key and Modal-Secret headers from step 3.
 
 Dev (ephemeral, hot-reload):
-    modal serve examples/modal_deploy.py
+    uvx modal serve examples/modal_deploy.py
 """
 
 import os

@@ -446,14 +446,12 @@ async def account_overview(
     include: list[Literal["balances", "positions"]] | None = None,
 ) -> dict[str, Any]:
     """
-    Get account balances and/or open positions.
+    Get balances and/or open positions.
 
     Args:
-        include: Sections to return (default: ["balances", "positions"]).
+        include: Sections to return; defaults to ["balances", "positions"].
 
-    Balances include net_liquidating_value, cash_balance, buying_power, margin requirements, etc.
-    Use get_history(type="transactions", transaction_type="Money Movement") to separate
-    trading performance from deposits/withdrawals.
+    Use get_history(type="transactions", transaction_type="Money Movement") for deposits/withdrawals.
     """
     return await build_account_overview(ctx, include)
 
@@ -469,15 +467,15 @@ async def get_history(
     limit: int = 25,
 ) -> str:
     """
-    Get transaction or order history (paginated).
+    Get paginated transaction or order history.
 
     Args:
-        type: "transactions" for trade/cash flow history, "orders" for filled/canceled/rejected orders.
-        days: Number of days to look back (default: 90 for transactions, 7 for orders).
+        type: transactions for trade/cash flows, orders for order history.
+        days: Lookback; defaults to 90 for transactions, 7 for orders.
         underlying_symbol: Filter by underlying symbol.
-        transaction_type: Filter transactions by type (only for type="transactions").
-        page_offset: Starting offset for pagination (default: 0).
-        limit: Maximum number of results to return (default: 25). Use with page_offset to paginate through large result sets.
+        transaction_type: Transactions only: Trade or Money Movement.
+        page_offset: Starting offset.
+        limit: Page size.
     """
     async with rate_limiter:
         return await fetch_history(
@@ -501,25 +499,17 @@ async def place_order(
     dry_run: bool = False,
 ) -> dict[str, Any]:
     """
-    Place a new order using live quote-derived mid pricing.
+    Place a new order using live quote-derived mid pricing. No manual limit price is accepted.
 
-    The tool resolves exact instruments, fetches live quotes, computes a signed net mid limit,
-    validates the final limit against bid/ask guardrails, and optionally sizes quantity from
-    target_value. It does not accept a raw limit price.
+    For options, set symbol to the underlying and include option_type, strike_price, expiration_date.
+    Multi-leg quantities are ratios when target_value is set.
 
     Args:
-        legs: Order legs. Equities/options use Buy/Sell to Open/Close; futures use Buy/Sell.
-        target_value: Optional dollar budget. Quantity is derived from current mid pricing.
-        chase: If true, wait 10s after placement; if still live, recalculate from fresh quotes and
-               move one valid tick toward fill, up to 10 reprices. Default: true.
-        time_in_force: Order time in force. Default: Day.
-        dry_run: Validate and preview without sending a live order.
-
-    Examples:
-        Stock: place_order(legs=[{"symbol": "AAPL", "action": "Buy to Open", "quantity": 100}])
-        Option: place_order(legs=[{"symbol": "TQQQ", "option_type": "C", "action": "Buy to Open", "quantity": 17, "strike_price": 100.0, "expiration_date": "2026-01-16"}])
-        Budget: place_order(legs=[{"symbol": "TSLA", "option_type": "C", "action": "Buy to Open", "strike_price": 300.0, "expiration_date": "2026-01-16"}], target_value=50000)
-        Future: place_order(legs=[{"symbol": "/ESM26", "action": "Buy", "quantity": 1}])
+        legs: Equities/options use Buy/Sell to Open/Close; futures use Buy/Sell.
+        target_value: Dollar budget; derives whole shares/contracts from current mid pricing.
+        chase: If true, reprice live orders every 10s toward fill, up to 10 times.
+        time_in_force: Default Day.
+        dry_run: Preview without sending.
     """
     if not legs:
         raise ValueError("'legs' is required")
@@ -531,10 +521,7 @@ async def place_order(
 @mcp_app.tool()
 async def replace_order(ctx: Context, order_id: str) -> dict[str, Any]:
     """
-    Reprice an existing live order at the current quote-derived mid.
-
-    Use this for a one-time mid reprice. For automated repricing after a new order,
-    use place_order with chase=true.
+    Reprice a live order once at the current quote-derived mid. For automatic repricing, use place_order(chase=true).
     """
     context = get_context(ctx)
     async with rate_limiter:
@@ -571,22 +558,11 @@ async def list_orders(ctx: Context) -> str:
 @mcp_app.tool()
 async def get_quotes(ctx: Context, instruments: list[InstrumentSpec], timeout: float = 10.0) -> str:
     """
-    Get live quotes for stocks, options, futures, and indices via DXLink streaming.
+    Get live quotes for stocks, options, futures, and indices.
 
     Args:
-        instruments: List of instrument specifications. Each contains:
-            - symbol: str - Symbol (e.g., 'AAPL', '/ESH26', 'SPX')
-            - instrument_type: str - Optional. Auto-detected if omitted ('/' prefix → Future).
-              Use 'Index' for index symbols (SPX, VIX, NDX).
-            - option_type: 'C' or 'P' (optional, omit for stocks/futures/indices)
-            - strike_price: float (required for options)
-            - expiration_date: str - YYYY-MM-DD format (required for options)
-        timeout: Timeout in seconds
-
-    Examples:
-        Stock: get_quotes([{"symbol": "AAPL"}])
-        Index: get_quotes([{"symbol": "SPX", "instrument_type": "Index"}])
-        Option: get_quotes([{"symbol": "TQQQ", "option_type": "C", "strike_price": 100.0, "expiration_date": "2026-01-16"}])
+        instruments: Use symbol only for stocks/futures; set instrument_type="Index" for SPX/VIX/NDX; add option fields for options.
+        timeout: Seconds to wait for DXLink data.
     """
     if not instruments:
         raise ValueError("At least one instrument is required")
@@ -606,15 +582,11 @@ async def get_quotes(ctx: Context, instruments: list[InstrumentSpec], timeout: f
 @mcp_app.tool()
 async def get_greeks(ctx: Context, options: list[OptionSpec], timeout: float = 10.0) -> str:
     """
-    Get Greeks (delta, gamma, theta, vega, rho) for options via DXLink streaming.
+    Get option Greeks: delta, gamma, theta, vega, rho.
 
     Args:
-        options: List of option specifications. Each contains:
-            - symbol: str - Stock symbol (e.g., 'AAPL', 'TQQQ')
-            - option_type: 'C' or 'P'
-            - strike_price: float
-            - expiration_date: str - YYYY-MM-DD format
-        timeout: Timeout in seconds
+        options: Option contracts by underlying symbol, C/P, strike, and expiration_date.
+        timeout: Seconds to wait for DXLink data.
     """
     if not options:
         raise ValueError("At least one option is required")
@@ -634,17 +606,12 @@ async def get_gex(
     timeout: float = 60.0,
 ) -> dict[str, Any]:
     """
-    Get Gamma Exposure (GEX) analysis for an option chain.
-
-    Computes dealer gamma exposure per strike (gamma × OI × 100) and returns
-    key levels: net GEX, gamma regime, flip level, call/put walls, and top strikes.
-
-    Assumes standard dealer positioning: long calls (positive GEX), short puts (negative GEX).
+    Get GEX for one option expiration: net GEX, regime, flip level, call/put walls, top strikes.
 
     Args:
-        symbol: Underlying symbol (e.g., 'SPY', 'SPX', 'AAPL').
-        expiration_date: Expiration date in YYYY-MM-DD format.
-        timeout: Timeout in seconds (default: 60). Large chains may need more time.
+        symbol: Underlying symbol, e.g. SPY, SPX, AAPL.
+        expiration_date: YYYY-MM-DD.
+        timeout: Seconds to wait; large chains may need more.
     """
     session = get_session(ctx)
     target_date = validate_date_format(expiration_date)
@@ -729,10 +696,7 @@ async def get_gex(
 @mcp_app.tool()
 async def get_market_metrics(ctx: Context, symbols: list[str]) -> str:
     """
-    Get market metrics including volatility (IV/HV), risk (beta, correlation),
-    valuation (P/E, market cap), liquidity, dividends, earnings, and options data.
-
-    Note extreme IV rank/percentile (0-1): low = cheap options (buy opportunity), high = expensive options (close positions).
+    Get IV/HV, beta, liquidity, valuation, dividends, earnings. IV rank/percentile are 0-1.
     """
     session = get_session(ctx)
     result = await metrics.get_market_metrics(session, symbols)
@@ -744,8 +708,7 @@ async def market_status(
     ctx: Context, exchanges: list[Literal["Equity", "CME", "CFE", "Smalls"]] | None = None
 ) -> dict[str, Any]:
     """
-    Get market status for each exchange including current open/closed state,
-    next opening times, holiday information, and current NYC time.
+    Get exchange open/closed status, next open/close, holiday flags, and current NYC time.
     """
     if exchanges is None:
         exchanges = ["Equity"]
@@ -784,11 +747,11 @@ async def market_status(
 
 @mcp_app.tool()
 async def search_symbols(ctx: Context, symbol: str, limit: int = 10) -> str:
-    """Search for symbols similar to the given search phrase.
+    """Search symbols by ticker or company name.
 
     Args:
-        symbol: Search phrase (e.g., 'AAPL', 'Apple').
-        limit: Maximum number of results to return (default: 10).
+        symbol: Query, e.g. AAPL or Apple.
+        limit: Max results.
     """
     session = get_session(ctx)
     async with rate_limiter:
@@ -805,19 +768,17 @@ async def watchlist(
     symbols: list[WatchlistSymbol] | None = None,
 ) -> list[dict[str, Any]] | dict[str, Any]:
     """
-    Manage watchlists: list, add symbols, remove symbols, or delete.
+    Manage watchlists.
 
     Actions:
-        list: Get watchlists. No name = compact metadata for all watchlists. With name = that watchlist's symbols.
-              Use watchlist_type to switch between 'public' and 'private'.
-        add: Add symbols to a private watchlist (creates it if it doesn't exist).
-        remove: Remove symbols from a private watchlist.
-        delete: Delete a private watchlist by name.
+        list: no name returns compact watchlists; with name returns symbols. Supports public/private.
+        add: add symbols to a private watchlist; creates if missing.
+        remove: remove symbols from a private watchlist.
+        delete: delete a private watchlist by name.
 
     Args:
-        symbols: Required for 'add' and 'remove'. Each symbol has:
-            - symbol: str - e.g., "AAPL", "TSLA"
-            - instrument_type: str - "Equity", "Equity Option", "Future", etc.
+        name: Watchlist name; defaults to main for add/remove/delete.
+        symbols: Required for add/remove; each needs symbol and tastytrade instrument_type.
     """
     return await manage_watchlist(ctx, action, watchlist_type, name, symbols)
 

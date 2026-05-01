@@ -46,25 +46,23 @@ class InstrumentDetail:
 class InstrumentSpec(BaseModel):
     """Specification for an instrument (stock, option, future, or index)."""
 
-    symbol: str = Field(..., description="Symbol (e.g., 'AAPL', '/ESH26', 'SPX')")
+    symbol: str = Field(..., description="Symbol, e.g. AAPL, /ESH26, SPX.")
     instrument_type: Literal["Equity", "Future", "Index"] | None = Field(
         None,
-        description="Instrument type. Auto-detected if omitted: '/' prefix → Future, option fields → Option, otherwise Equity. Use 'Index' for index symbols like SPX, VIX, NDX.",
+        description="Omit to infer Equity/Future/Option; use Index for SPX, VIX, NDX.",
     )
-    option_type: Literal["C", "P"] | None = Field(
-        None, description="Option type: 'C' for call, 'P' for put (omit for stocks)"
-    )
-    strike_price: float | None = Field(None, description="Strike price (required for options)")
-    expiration_date: str | None = Field(None, description="Expiration date in YYYY-MM-DD format (required for options)")
+    option_type: Literal["C", "P"] | None = Field(None, description="C=call, P=put; required for options.")
+    strike_price: float | None = Field(None, description="Required for options.")
+    expiration_date: str | None = Field(None, description="YYYY-MM-DD; required for options.")
 
 
 class OptionSpec(BaseModel):
     """Specification for an equity option contract."""
 
-    symbol: str = Field(..., description="Underlying symbol (e.g., 'AAPL', 'TSLA')")
-    option_type: Literal["C", "P"] = Field(..., description="Option type: 'C' for call, 'P' for put")
+    symbol: str = Field(..., description="Underlying symbol, e.g. AAPL.")
+    option_type: Literal["C", "P"] = Field(..., description="C=call, P=put.")
     strike_price: float = Field(..., description="Strike price")
-    expiration_date: str = Field(..., description="Expiration date in YYYY-MM-DD format")
+    expiration_date: str = Field(..., description="YYYY-MM-DD")
 
     def to_instrument_spec(self) -> InstrumentSpec:
         return InstrumentSpec(
@@ -79,21 +77,19 @@ class OptionSpec(BaseModel):
 class OrderLeg(BaseModel):
     """Specification for an order leg."""
 
-    symbol: str = Field(..., description="Stock symbol (e.g., 'TQQQ', 'AAPL')")
+    symbol: str = Field(..., description="Underlying stock or future symbol, e.g. AAPL or /ESM26.")
     action: OrderAction = Field(
         ...,
-        description="Use tastytrade order actions. Equities and options use 'Buy to Open', 'Buy to Close', 'Sell to Open', or 'Sell to Close'. Futures use 'Buy' or 'Sell'.",
+        description="Equities/options: Buy/Sell to Open/Close. Futures: Buy or Sell.",
     )
     quantity: int = Field(
         1,
         ge=1,
-        description="Number of contracts/shares. When sizing is supplied, this is the leg ratio and usually stays 1.",
+        description="Shares/contracts; with target_value this is a leg ratio, usually 1.",
     )
-    option_type: Literal["C", "P"] | None = Field(
-        None, description="Option type: 'C' for call, 'P' for put (omit for stocks)"
-    )
-    strike_price: float | None = Field(None, description="Strike price (required for options)")
-    expiration_date: str | None = Field(None, description="Expiration date in YYYY-MM-DD format (required for options)")
+    option_type: Literal["C", "P"] | None = Field(None, description="C=call, P=put; required for options.")
+    strike_price: float | None = Field(None, description="Required for options.")
+    expiration_date: str | None = Field(None, description="YYYY-MM-DD; required for options.")
 
     @model_validator(mode="after")
     def validate_action_for_instrument(self) -> OrderLeg:

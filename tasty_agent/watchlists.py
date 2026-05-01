@@ -16,9 +16,9 @@ logger = logging.getLogger(__name__)
 class WatchlistSymbol(BaseModel):
     """Symbol specification for watchlist operations."""
 
-    symbol: str = Field(..., description="Stock symbol (e.g., 'AAPL', 'TSLA')")
+    symbol: str = Field(..., description="Symbol, e.g. AAPL.")
     instrument_type: Literal["Equity", "Equity Option", "Future", "Future Option", "Cryptocurrency", "Warrant"] = Field(
-        ..., description="Instrument type"
+        ..., description="Tastytrade instrument type."
     )
 
 

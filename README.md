@@ -75,10 +75,10 @@ Add to your MCP client configuration (e.g., `claude_desktop_config.json`):
 Deploy as a remote MCP server on [Modal](https://modal.com) with proxy auth:
 
 ```bash
-pip install modal && modal setup
+uvx modal setup
 
 # Create secrets
-modal secret create tasty-agent-secrets \
+uvx modal secret create tasty-agent-secrets \
   TASTYTRADE_CLIENT_SECRET=your_secret \
   TASTYTRADE_REFRESH_TOKEN=your_token
 
@@ -88,18 +88,10 @@ modal secret create tasty-agent-secrets \
 export MODAL_HOST=<workspace>--tasty-agent-mcp-server.modal.run
 
 # Deploy
-modal deploy examples/modal_deploy.py
+uvx modal deploy examples/modal_deploy.py
 ```
 
 Clients authenticate with `Modal-Key` and `Modal-Secret` headers. See [`examples/modal_deploy.py`](examples/modal_deploy.py).
-
-Tagged releases can also auto-deploy the Modal app. Configure these GitHub settings once:
-
-- secrets: `MODAL_TOKEN_ID`, `MODAL_TOKEN_SECRET`
-- variable: `MODAL_HOST`
-- optional variable: `TASTY_AGENT_SECRET_NAME` if you do not use the default `tasty-agent-secrets`
-
-After that, pushing a release tag like `v4.1.2` will publish to PyPI and deploy Modal with `tasty-agent==4.1.2`.
 
 ### Programmatic (Python client)
 
