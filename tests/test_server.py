@@ -1,8 +1,11 @@
 """Unit tests for tasty_agent.server module."""
 
 import asyncio
+import json
+import re
 from datetime import UTC, date, datetime
 from decimal import Decimal
+from html import unescape
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -47,6 +50,7 @@ from tasty_agent.server import (
     market_status,
     place_order,
     replace_order,
+    tool_xml,
 )
 from tasty_agent.watchlists import WatchlistSymbol, _compact_watchlist
 
@@ -57,6 +61,12 @@ class NoopLimiter:
 
     async def __aexit__(self, *_):
         return None
+
+
+def parse_tool_xml(text: str, tool_name: str):
+    match = re.fullmatch(rf"<{tool_name}(?:\s[^>]*)?>([\s\S]*)</{tool_name}>", text)
+    assert match is not None
+    return json.loads(unescape(match.group(1)))
 
 
 class TestToTable:
@@ -78,6 +88,12 @@ class TestToTable:
 
 class TestCompactToolOutputs:
     """Tests for token-efficient tool output rows."""
+
+    def test_tool_xml_wraps_json_concisely(self):
+        result = tool_xml("get_quotes", {"status": "Open", "note": "A&B"})
+
+        assert result == '<quotes>{"status":"Open","note":"A&amp;B"}</quotes>'
+        assert parse_tool_xml(result, "quotes") == {"status": "Open", "note": "A&B"}
 
     def test_compact_quote_row_keeps_actionable_fields_only(self):
         event = Mock()
@@ -318,7 +334,7 @@ class TestMarketStatusTool:
             patch("tasty_agent.server.get_market_holidays", new=AsyncMock(return_value=mock_calendar)),
             patch("tasty_agent.server.now_in_new_york", return_value=datetime(2026, 4, 23, 9, 30, tzinfo=UTC)),
         ):
-            result = await market_status(mock_ctx, ["Equity"])
+            result = parse_tool_xml(await market_status(mock_ctx, ["Equity"]), "market_status")
 
         assert result["current_time_nyc"] == "2026-04-23T09:30:00+00:00"
         assert result["exchanges"] == [
@@ -384,7 +400,7 @@ class TestOrderTools:
             patch("tasty_agent.server.rate_limiter", NoopLimiter()),
             patch("tasty_agent.server.asyncio.sleep", new=AsyncMock()),
         ):
-            result = await place_order(mock_ctx, legs=[leg], chase=True)
+            result = parse_tool_xml(await place_order(mock_ctx, legs=[leg], chase=True), "order")
 
         assert result["chase"] == {
             "status": "still_live",
@@ -438,7 +454,7 @@ class TestOrderTools:
             ) as resolved,
             patch("tasty_agent.server.rate_limiter", NoopLimiter()),
         ):
-            result = await replace_order(mock_ctx, order_id="12345")
+            result = parse_tool_xml(await replace_order(mock_ctx, order_id="12345"), "order")
 
         assert result == {}
         resolved.assert_awaited_once_with(mock_ctx, [broker_leg])
@@ -678,6 +694,26 @@ class TestOrderPricing:
         market = build_order_market([detail], [leg], [self.quote("1.00", "1.20")])
 
         assert market.tick_size == Decimal("0.05")
+
+    def test_mid_policy_rounds_to_nearest_option_tick(self):
+        leg = OrderLeg(
+            symbol="AAPL",
+            action=OrderAction.BUY_TO_OPEN,
+            option_type="C",
+            strike_price=150.0,
+            expiration_date="2026-12-18",
+        )
+        detail = self.option_detail(".AAPL261218C150")
+        detail.tick_sizes = [SimpleNamespace(value=Decimal("0.05"), threshold=None)]
+        market = build_order_market([detail], [leg], [self.quote("1.11", "1.13")])
+
+        price, warnings = resolve_order_price(market, PricingPolicy())
+
+        assert market.mid_price == Decimal("-1.12")
+        assert market.tick_size == Decimal("0.05")
+        assert price == Decimal("-1.10")
+        assert len(warnings) == 1
+        assert "nearest valid tick" in warnings[0]
 
     def test_target_value_sizes_option_contract_quantity(self):
         leg = OrderLeg(symbol="TSLA", action=OrderAction.BUY_TO_OPEN)

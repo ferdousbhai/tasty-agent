@@ -447,7 +447,7 @@ def _policy_price(market: OrderMarket, pricing: PricingPolicy) -> Decimal:
 
     candidate = _round_to_cent(_round_to_tick(raw_price, market.tick_size))
     if not _has_tick_price_inside(market):
-        return min(max(candidate, market.natural_price), market.passive_price)
+        return candidate
     if candidate <= market.natural_price:
         return _round_to_cent(_round_to_tick(market.natural_price + market.tick_size, market.tick_size))
     if candidate >= market.passive_price:
@@ -462,13 +462,19 @@ def _validate_limit_price(
 ) -> list[str]:
     warnings: list[str] = []
 
-    if candidate < market.natural_price or candidate > market.passive_price:
+    outside_market = candidate < market.natural_price or candidate > market.passive_price
+    if outside_market and _has_tick_price_inside(market):
         raise ValueError(
             f"Limit price {format_signed_money(candidate)} is outside the current order market "
             f"({format_order_market(market)}). Omit manual pricing so the tool uses exact-instrument mid pricing."
         )
 
-    if candidate <= market.natural_price or candidate >= market.passive_price:
+    if outside_market:
+        warnings.append(
+            "No valid tick price exists strictly inside the current bid/ask spread; "
+            f"using nearest valid tick {format_signed_money(candidate)} for {format_order_market(market)}."
+        )
+    elif candidate <= market.natural_price or candidate >= market.passive_price:
         if _has_tick_price_inside(market):
             raise ValueError(
                 f"Limit price {format_signed_money(candidate)} must be strictly inside the current order market "

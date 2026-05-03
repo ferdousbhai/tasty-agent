@@ -1,7 +1,9 @@
 import asyncio
+import json
 import logging
 from datetime import UTC, datetime
 from decimal import Decimal
+from html import escape as escape_xml_text
 from typing import Any, Literal
 
 import humanize
@@ -63,6 +65,27 @@ CHASE_MAX_ATTEMPTS = 10
 CHASE_STEP_TICKS = 1
 
 mcp_app = FastMCP("TastyTrade", lifespan=lifespan)
+
+TOOL_XML_TAGS = {
+    "get_history": "history",
+    "place_order": "order",
+    "replace_order": "order",
+    "cancel_order": "order",
+    "list_orders": "orders",
+    "get_quotes": "quotes",
+    "get_greeks": "greeks",
+    "get_gex": "gex",
+    "get_market_metrics": "market_metrics",
+    "search_symbols": "symbol_search",
+}
+
+
+def tool_xml(tool_name: str, payload: Any, *, error: bool = False) -> str:
+    """Format MCP tool output as one concise XML block."""
+    tag_name = TOOL_XML_TAGS.get(tool_name, tool_name)
+    attrs = ' error="true"' if error else ""
+    text = payload if isinstance(payload, str) else json.dumps(payload, default=str, separators=(",", ":"))
+    return f"<{tag_name}{attrs}>{escape_xml_text(text, quote=False)}</{tag_name}>"
 
 
 def main() -> None:
@@ -444,7 +467,7 @@ def _compact_market_metric(metric) -> dict[str, Any]:
 async def account_overview(
     ctx: Context,
     include: list[Literal["balances", "positions"]] | None = None,
-) -> dict[str, Any]:
+) -> str:
     """
     Get balances and/or open positions.
 
@@ -453,7 +476,7 @@ async def account_overview(
 
     Use get_history(type="transactions", transaction_type="Money Movement") for deposits/withdrawals.
     """
-    return await build_account_overview(ctx, include)
+    return tool_xml("account_overview", await build_account_overview(ctx, include))
 
 
 @mcp_app.tool()
@@ -478,7 +501,7 @@ async def get_history(
         limit: Page size.
     """
     async with rate_limiter:
-        return await fetch_history(
+        return tool_xml("get_history", await fetch_history(
             ctx,
             type=type,
             days=days,
@@ -486,7 +509,7 @@ async def get_history(
             transaction_type=transaction_type,
             page_offset=page_offset,
             limit=limit,
-        )
+        ))
 
 
 @mcp_app.tool()
@@ -497,9 +520,10 @@ async def place_order(
     chase: bool = True,
     time_in_force: OrderTimeInForce = OrderTimeInForce.DAY,
     dry_run: bool = False,
-) -> dict[str, Any]:
+) -> str:
     """
-    Place a new order using live quote-derived mid pricing. No manual limit price is accepted.
+    Place a new order using live quote-derived mid pricing, rounded to the nearest valid tick.
+    No manual limit price is accepted.
 
     For options, set symbol to the underlying and include option_type, strike_price, expiration_date.
     Multi-leg quantities are ratios when target_value is set.
@@ -515,11 +539,11 @@ async def place_order(
         raise ValueError("'legs' is required")
 
     async with rate_limiter:
-        return await _place_new_order(ctx, legs, time_in_force, target_value, dry_run, chase)
+        return tool_xml("place_order", await _place_new_order(ctx, legs, time_in_force, target_value, dry_run, chase))
 
 
 @mcp_app.tool()
-async def replace_order(ctx: Context, order_id: str) -> dict[str, Any]:
+async def replace_order(ctx: Context, order_id: str) -> str:
     """
     Reprice a live order once at the current quote-derived mid. For automatic repricing, use place_order(chase=true).
     """
@@ -536,15 +560,15 @@ async def replace_order(ctx: Context, order_id: str) -> dict[str, Any]:
                 price=resolved_price,
             ),
         )
-        return _compact_order_response(response)
+        return tool_xml("replace_order", _compact_order_response(response))
 
 
 @mcp_app.tool()
-async def cancel_order(ctx: Context, order_id: str) -> dict[str, Any]:
+async def cancel_order(ctx: Context, order_id: str) -> str:
     """Cancel a live order by id."""
     context = get_context(ctx)
     await context.account.delete_order(context.session, int(order_id))
-    return {"success": True, "order_id": order_id}
+    return tool_xml("cancel_order", {"success": True, "order_id": order_id})
 
 
 @mcp_app.tool()
@@ -552,7 +576,7 @@ async def list_orders(ctx: Context) -> str:
     """List all live orders."""
     context = get_context(ctx)
     orders = await context.account.get_live_orders(context.session)
-    return to_table([_compact_order(order) for order in orders])
+    return tool_xml("list_orders", to_table([_compact_order(order) for order in orders]))
 
 
 @mcp_app.tool()
@@ -576,7 +600,7 @@ async def get_quotes(ctx: Context, instruments: list[InstrumentSpec], timeout: f
         events = await _stream_quotes_with_trade_fallback(session, streamer_symbols, index_symbols, timeout)
     else:
         events = await _stream_events(session, Quote, streamer_symbols, timeout)
-    return to_table([_compact_quote_event(event) for event in events])
+    return tool_xml("get_quotes", to_table([_compact_quote_event(event) for event in events]))
 
 
 @mcp_app.tool()
@@ -595,7 +619,7 @@ async def get_greeks(ctx: Context, options: list[OptionSpec], timeout: float = 1
     option_details = await get_instrument_details(session, [option.to_instrument_spec() for option in options])
 
     greeks = await _stream_events(session, Greeks, [d.streamer_symbol for d in option_details], timeout)
-    return to_table([_compact_greeks_event(greek) for greek in greeks])
+    return tool_xml("get_greeks", to_table([_compact_greeks_event(greek) for greek in greeks]))
 
 
 @mcp_app.tool()
@@ -604,7 +628,7 @@ async def get_gex(
     symbol: str,
     expiration_date: str,
     timeout: float = 60.0,
-) -> dict[str, Any]:
+) -> str:
     """
     Get GEX for one option expiration: net GEX, regime, flip level, call/put walls, top strikes.
 
@@ -690,7 +714,7 @@ async def get_gex(
         result["put_wall"] = {"strike": put_wall, "gex": round(negative_strikes[put_wall], 2)}
     result["top_strikes"] = [{"strike": s, "gex": round(g, 2)} for s, g in top]
 
-    return result
+    return tool_xml("get_gex", result)
 
 
 @mcp_app.tool()
@@ -700,13 +724,13 @@ async def get_market_metrics(ctx: Context, symbols: list[str]) -> str:
     """
     session = get_session(ctx)
     result = await metrics.get_market_metrics(session, symbols)
-    return to_table([_compact_market_metric(metric) for metric in result])
+    return tool_xml("get_market_metrics", to_table([_compact_market_metric(metric) for metric in result]))
 
 
 @mcp_app.tool()
 async def market_status(
     ctx: Context, exchanges: list[Literal["Equity", "CME", "CFE", "Smalls"]] | None = None
-) -> dict[str, Any]:
+) -> str:
     """
     Get exchange open/closed status, next open/close, holiday flags, and current NYC time.
     """
@@ -742,7 +766,7 @@ async def market_status(
 
         results.append(result)
 
-    return {"current_time_nyc": now_in_new_york().isoformat(), "exchanges": results}
+    return tool_xml("market_status", {"current_time_nyc": now_in_new_york().isoformat(), "exchanges": results})
 
 
 @mcp_app.tool()
@@ -756,7 +780,7 @@ async def search_symbols(ctx: Context, symbol: str, limit: int = 10) -> str:
     session = get_session(ctx)
     async with rate_limiter:
         results = await symbol_search(session, symbol)
-    return to_table(results[:limit])
+    return tool_xml("search_symbols", to_table(results[:limit]))
 
 
 @mcp_app.tool()
@@ -766,7 +790,7 @@ async def watchlist(
     watchlist_type: Literal["public", "private"] = "private",
     name: str | None = None,
     symbols: list[WatchlistSymbol] | None = None,
-) -> list[dict[str, Any]] | dict[str, Any]:
+) -> str:
     """
     Manage watchlists.
 
@@ -780,7 +804,7 @@ async def watchlist(
         name: Watchlist name; defaults to main for add/remove/delete.
         symbols: Required for add/remove; each needs symbol and tastytrade instrument_type.
     """
-    return await manage_watchlist(ctx, action, watchlist_type, name, symbols)
+    return tool_xml("watchlist", await manage_watchlist(ctx, action, watchlist_type, name, symbols))
 
 
 @mcp_app.prompt(title="IV Rank Analysis")
