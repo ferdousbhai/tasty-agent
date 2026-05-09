@@ -1,4 +1,3 @@
-import asyncio
 import json
 import logging
 from datetime import UTC, datetime
@@ -11,8 +10,7 @@ from aiolimiter import AsyncLimiter
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.fastmcp.prompts.base import AssistantMessage, Message, UserMessage
 from tastytrade import metrics
-from tastytrade.dxfeed import Greeks, Quote, Summary
-from tastytrade.instruments import Option
+from tastytrade.dxfeed import Greeks, Quote
 from tastytrade.market_sessions import ExchangeType, MarketStatus, get_market_holidays, get_market_sessions
 from tastytrade.order import OrderTimeInForce
 from tastytrade.search import symbol_search
@@ -27,9 +25,6 @@ from tasty_agent.market_data import (
     stream_events as _stream_events,
 )
 from tasty_agent.market_data import (
-    stream_multi_events as _stream_multi_events,
-)
-from tasty_agent.market_data import (
     stream_quotes_with_trade_fallback as _stream_quotes_with_trade_fallback,
 )
 from tasty_agent.orders import (
@@ -39,7 +34,6 @@ from tasty_agent.orders import (
     OrderLeg,
     OrderSizingPolicy,
     OrderSizingResult,
-    PricingPolicy,
     apply_order_sizing,
     build_new_order,
     build_order_legs,
@@ -48,21 +42,15 @@ from tasty_agent.orders import (
     find_live_order,
     format_order_market,
     format_signed_money,
-    get_cached_option_chain,
     get_instrument_details,
     get_order_leg_instrument_details,
-    order_price_tick_cents,
     resolve_order_price,
-    validate_date_format,
 )
 from tasty_agent.watchlists import WatchlistSymbol, manage_watchlist
 
 logger = logging.getLogger(__name__)
 
 rate_limiter = AsyncLimiter(2, 1)  # 2 requests per second
-CHASE_INTERVAL_SECONDS = 10.0
-CHASE_MAX_ATTEMPTS = 10
-CHASE_STEP_TICKS = 1
 
 mcp_app = FastMCP("TastyTrade", lifespan=lifespan)
 
@@ -74,7 +62,6 @@ TOOL_XML_TAGS = {
     "list_orders": "orders",
     "get_quotes": "quotes",
     "get_greeks": "greeks",
-    "get_gex": "gex",
     "get_market_metrics": "market_metrics",
     "search_symbols": "symbol_search",
 }
@@ -107,33 +94,6 @@ async def _fetch_order_market(ctx: Context, instrument_details: list[InstrumentD
     return build_order_market(instrument_details, legs, quotes)
 
 
-def _pricing_policy_from_offset(offset_cents: int | None) -> PricingPolicy:
-    """Build the internal pricing policy used by mid pricing and chase reprices."""
-    if offset_cents is None or offset_cents == 0:
-        return default_pricing_policy()
-    if offset_cents < 0:
-        raise ValueError("Price offset must be greater than or equal to 0")
-    return PricingPolicy(
-        mode="mid_toward_natural",
-        offset_cents=offset_cents,
-        mid_distance_warning_cents=5,
-        mid_distance_warning_spread_fraction=0.25,
-    )
-
-
-def _pricing_label(pricing_policy: PricingPolicy) -> str:
-    if pricing_policy.mode == "mid":
-        return "mid"
-    return f"mid {pricing_policy.offset_cents}c toward natural"
-
-
-async def calculate_net_price(ctx: Context, instrument_details: list[InstrumentDetail], legs: list[OrderLeg]) -> float:
-    """Calculate a guarded signed net mid-price from current market quotes."""
-    market = await _fetch_order_market(ctx, instrument_details, legs)
-    resolved_price, _ = resolve_order_price(market, default_pricing_policy())
-    return float(resolved_price)
-
-
 async def _resolve_order_inputs(
     ctx: Context,
     legs: list[OrderLeg],
@@ -160,7 +120,7 @@ async def _resolve_order_inputs(
             await ctx.warning(warning)
         await ctx.info(
             f"Resolved limit price {format_signed_money(resolved_price)} "
-            f"from {_pricing_label(pricing_policy)} ({format_order_market(market)})."
+            f"from mid ({format_order_market(market)})."
         )
         logger.info(f"Auto-calculated price {resolved_price} for {len(legs)}-leg order")
         if sizing_result is not None:
@@ -181,15 +141,8 @@ async def _place_new_order(
     time_in_force: OrderTimeInForce,
     target_value: float | None,
     dry_run: bool,
-    chase: bool,
 ) -> dict[str, Any]:
     """Resolve a new order and place it."""
-    if chase and target_value is not None:
-        await ctx.warning(
-            "Chase repricing keeps the initially sized quantity fixed, so final notional/premium "
-            "can move above target_value if the market moves or the order is repriced toward natural."
-        )
-
     context = get_context(ctx)
     instrument_details, sized_legs, resolved_price, sizing_result = await _resolve_order_inputs(
         ctx,
@@ -206,11 +159,6 @@ async def _place_new_order(
     compact_sizing = _compact_sizing_result(sizing_result)
     if compact_sizing:
         result["sizing"] = compact_sizing
-    if chase:
-        if dry_run:
-            result["chase"] = {"status": "skipped_dry_run"}
-        else:
-            result["chase"] = await _chase_live_order(ctx, response)
     return result
 
 
@@ -237,85 +185,16 @@ async def _resolve_replacement_price(
 async def _resolve_replacement_market_price(
     ctx: Context,
     market,
-    offset_cents: int | None = None,
 ) -> Decimal:
-    pricing_policy = _pricing_policy_from_offset(offset_cents)
+    pricing_policy = default_pricing_policy()
     resolved_price, warnings = resolve_order_price(market, pricing_policy)
     for warning in warnings:
         await ctx.warning(warning)
     await ctx.info(
         f"Resolved replacement limit {format_signed_money(resolved_price)} "
-        f"from {_pricing_label(pricing_policy)} ({format_order_market(market)})."
+        f"from mid ({format_order_market(market)})."
     )
     return resolved_price
-
-
-def _response_order_id(response) -> str | None:
-    order = getattr(response, "order", None)
-    order_id = getattr(order, "id", None)
-    return str(order_id) if order_id is not None else None
-
-
-async def _get_live_order(ctx: Context, order_id: str):
-    context = get_context(ctx)
-    live_orders = await context.account.get_live_orders(context.session)
-    return next((order for order in live_orders if str(order.id) == str(order_id)), None)
-
-
-async def _chase_live_order(
-    ctx: Context,
-    initial_response,
-) -> dict[str, Any]:
-    """Check a live order and reprice toward natural using fresh quotes each attempt."""
-    current_order_id = _response_order_id(initial_response)
-    if current_order_id is None:
-        return {"status": "no_order_id"}
-
-    context = get_context(ctx)
-    last_price: Decimal | None = None
-    last_step_ticks = 0
-    last_tick_cents = 0
-    reprices = 0
-
-    for attempt in range(1, CHASE_MAX_ATTEMPTS + 1):
-        await asyncio.sleep(CHASE_INTERVAL_SECONDS)
-        live_order = await _get_live_order(ctx, current_order_id)
-        if live_order is None:
-            return {
-                "status": "not_live",
-                "checks": attempt,
-                "reprices": reprices,
-                "order_id": current_order_id,
-            }
-
-        session = get_session(ctx)
-        instrument_details = await get_order_leg_instrument_details(session, live_order.legs)
-        market = await _fetch_order_market(ctx, instrument_details, live_order.legs)
-        last_tick_cents = order_price_tick_cents(instrument_details, market)
-        last_step_ticks = attempt * CHASE_STEP_TICKS
-        offset_cents = last_step_ticks * last_tick_cents
-        last_price = await _resolve_replacement_market_price(ctx, market, offset_cents=offset_cents)
-        response = await context.account.replace_order(
-            context.session,
-            int(current_order_id),
-            build_new_order(
-                time_in_force=live_order.time_in_force,
-                legs=live_order.legs,
-                price=last_price,
-            ),
-        )
-        reprices += 1
-        current_order_id = _response_order_id(response) or current_order_id
-
-    return {
-        "status": "still_live",
-        "checks": CHASE_MAX_ATTEMPTS,
-        "reprices": reprices,
-        "order_id": current_order_id,
-        "last_step_ticks": last_step_ticks,
-        "last_tick_cents": last_tick_cents,
-        "last_price": compact_value(last_price),
-    }
 
 
 def _compact_order_legs(legs: list[Any] | None) -> str | None:
@@ -517,7 +396,6 @@ async def place_order(
     ctx: Context,
     legs: list[OrderLeg],
     target_value: float | None = None,
-    chase: bool = True,
     time_in_force: OrderTimeInForce = OrderTimeInForce.DAY,
     dry_run: bool = False,
 ) -> str:
@@ -531,7 +409,6 @@ async def place_order(
     Args:
         legs: Equities/options use Buy/Sell to Open/Close; futures use Buy/Sell.
         target_value: Dollar budget; derives whole shares/contracts from current mid pricing.
-        chase: If true, reprice live orders every 10s toward fill, up to 10 times.
         time_in_force: Default Day.
         dry_run: Preview without sending.
     """
@@ -539,13 +416,13 @@ async def place_order(
         raise ValueError("'legs' is required")
 
     async with rate_limiter:
-        return tool_xml("place_order", await _place_new_order(ctx, legs, time_in_force, target_value, dry_run, chase))
+        return tool_xml("place_order", await _place_new_order(ctx, legs, time_in_force, target_value, dry_run))
 
 
 @mcp_app.tool()
 async def replace_order(ctx: Context, order_id: str) -> str:
     """
-    Reprice a live order once at the current quote-derived mid. For automatic repricing, use place_order(chase=true).
+    Reprice a live order once at the current quote-derived mid.
     """
     context = get_context(ctx)
     async with rate_limiter:
@@ -620,101 +497,6 @@ async def get_greeks(ctx: Context, options: list[OptionSpec], timeout: float = 1
 
     greeks = await _stream_events(session, Greeks, [d.streamer_symbol for d in option_details], timeout)
     return tool_xml("get_greeks", to_table([_compact_greeks_event(greek) for greek in greeks]))
-
-
-@mcp_app.tool()
-async def get_gex(
-    ctx: Context,
-    symbol: str,
-    expiration_date: str,
-    timeout: float = 60.0,
-) -> str:
-    """
-    Get GEX for one option expiration: net GEX, regime, flip level, call/put walls, top strikes.
-
-    Args:
-        symbol: Underlying symbol, e.g. SPY, SPX, AAPL.
-        expiration_date: YYYY-MM-DD.
-        timeout: Seconds to wait; large chains may need more.
-    """
-    session = get_session(ctx)
-    target_date = validate_date_format(expiration_date)
-
-    chain = await get_cached_option_chain(session, symbol.upper())
-    if target_date not in chain:
-        available_dates = sorted(chain.keys())
-        raise ValueError(f"No options for {symbol.upper()} expiration {expiration_date}. Available: {available_dates}")
-
-    options: list[Option] = chain[target_date]
-    streamer_symbols = [opt.streamer_symbol for opt in options]
-
-    if not streamer_symbols:
-        raise ValueError(f"No option contracts found for {symbol.upper()} {expiration_date}")
-
-    opt_by_sym = {opt.streamer_symbol: opt for opt in options}
-
-    # Stream Greeks + Summary concurrently on a single DXLink connection
-    data = await _stream_multi_events(session, [Greeks, Summary], streamer_symbols, timeout)
-    greeks_map = data[Greeks]
-    summary_map = data[Summary]
-
-    # Compute per-strike GEX: gamma × OI × 100 (positive for calls, negative for puts)
-    strike_gex: dict[float, float] = {}
-    for sym, opt in opt_by_sym.items():
-        gamma_event = greeks_map.get(sym)
-        summary_event = summary_map.get(sym)
-        if not gamma_event or not summary_event:
-            continue
-        gamma = float(gamma_event.gamma) if gamma_event.gamma is not None else 0.0
-        oi = summary_event.open_interest or 0
-        gex = gamma * oi * 100
-        strike = float(opt.strike_price)
-        # Calls: positive (dealers long), Puts: negative (dealers short)
-        if opt.option_type.value == "P":
-            gex = -gex
-        strike_gex[strike] = strike_gex.get(strike, 0.0) + gex
-
-    if not strike_gex:
-        raise ValueError(f"No GEX data available for {symbol.upper()} {expiration_date}")
-
-    net_gex = sum(strike_gex.values())
-
-    # GEX flip level: strike where cumulative GEX (ascending) crosses zero
-    sorted_strikes = sorted(strike_gex.items())
-    gex_flip_level = None
-    cumulative = 0.0
-    for i, (strike, gex) in enumerate(sorted_strikes):
-        prev_cumulative = cumulative
-        cumulative += gex
-        if i > 0 and prev_cumulative * cumulative < 0:
-            # Linear interpolation between the two strikes
-            prev_strike = sorted_strikes[i - 1][0]
-            gex_flip_level = prev_strike + (strike - prev_strike) * (-prev_cumulative / (cumulative - prev_cumulative))
-            break
-
-    # Call wall: strike with highest positive GEX
-    positive_strikes = {s: g for s, g in strike_gex.items() if g > 0}
-    call_wall = max(positive_strikes, key=lambda strike: positive_strikes[strike]) if positive_strikes else None
-
-    # Put wall: strike with most negative GEX
-    negative_strikes = {s: g for s, g in strike_gex.items() if g < 0}
-    put_wall = min(negative_strikes, key=lambda strike: negative_strikes[strike]) if negative_strikes else None
-
-    # Top strikes by absolute GEX
-    top = sorted(strike_gex.items(), key=lambda x: abs(x[1]), reverse=True)[:5]
-
-    result: dict[str, Any] = {
-        "net_gex": round(net_gex, 2),
-        "gamma_regime": "positive" if net_gex >= 0 else "negative",
-        "gex_flip_level": round(gex_flip_level, 2) if gex_flip_level is not None else None,
-    }
-    if call_wall is not None:
-        result["call_wall"] = {"strike": call_wall, "gex": round(positive_strikes[call_wall], 2)}
-    if put_wall is not None:
-        result["put_wall"] = {"strike": put_wall, "gex": round(negative_strikes[put_wall], 2)}
-    result["top_strikes"] = [{"strike": s, "gex": round(g, 2)} for s, g in top]
-
-    return tool_xml("get_gex", result)
 
 
 @mcp_app.tool()

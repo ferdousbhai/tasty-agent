@@ -2036,7 +2036,6 @@ dev = [
     { name = "pytest-asyncio" },
     { name = "python-dotenv" },
     { name = "ruff" },
-    { name = "typer" },
 ]
 
 [package.metadata]
@@ -2058,7 +2057,6 @@ dev = [
     { name = "pytest-asyncio", specifier = ">=1.3.0" },
     { name = "python-dotenv", specifier = ">=1.1.0" },
     { name = "ruff", specifier = ">=0.14.10" },
-    { name = "typer" },
 ]
 
 [[package]]

@@ -7,7 +7,7 @@ from typing import Any
 
 import humanize
 from tastytrade import Session
-from tastytrade.dxfeed import Greeks, Quote, Summary, Trade
+from tastytrade.dxfeed import Greeks, Quote, Trade
 from tastytrade.market_sessions import ExchangeType, MarketStatus, get_market_sessions
 from tastytrade.streamer import DXLinkStreamer
 
@@ -114,66 +114,6 @@ async def stream_events(
             ValueError(f"Timeout getting quotes after {timeout}s. No data received for: {sorted(missing)}"),
         )
     return [events_by_symbol[s] for s in streamer_symbols]
-
-
-async def stream_multi_events(
-    session: Session,
-    event_types: list[type[Quote] | type[Greeks] | type[Summary]],
-    streamer_symbols: list[str],
-    timeout: float,
-) -> dict[type, dict[str, Any]]:
-    """Stream multiple event types concurrently on a single DXLink connection."""
-    results: dict[type, dict[str, Any]] = {et: {} for et in event_types}
-    expected = set(streamer_symbols)
-    exchanges = exchanges_for_symbols(streamer_symbols)
-    timed_out = False
-
-    def all_complete() -> bool:
-        return all(len(results[et]) >= len(expected) for et in event_types)
-
-    try:
-        async with DXLinkStreamer(session) as streamer:
-            for et in event_types:
-                await streamer.subscribe(et, streamer_symbols)
-            try:
-                async with asyncio.timeout(timeout):
-                    pending_tasks: dict[type, asyncio.Task] = {}
-                    while not all_complete():
-                        for et in event_types:
-                            if et not in pending_tasks and len(results[et]) < len(expected):
-                                pending_tasks[et] = asyncio.ensure_future(streamer.get_event(et))
-
-                        done, _ = await asyncio.wait(
-                            pending_tasks.values(),
-                            return_when=asyncio.FIRST_COMPLETED,
-                        )
-                        for task in done:
-                            event = task.result()
-                            for et in event_types:
-                                if pending_tasks.get(et) is task:
-                                    if event.event_symbol in expected:
-                                        results[et][event.event_symbol] = event
-                                    del pending_tasks[et]
-                                    break
-            except TimeoutError:
-                timed_out = True
-            finally:
-                for task in pending_tasks.values():
-                    task.cancel()
-    except ExceptionGroup as eg:
-        errors = "; ".join(f"{type(e).__name__}: {e}" for e in eg.exceptions)
-        await raise_with_market_context(
-            session, exchanges, ValueError(f"Streaming connection error for {sorted(expected)}: {errors}")
-        )
-
-    if timed_out:
-        missing_info = {
-            et.__name__: sorted(expected - set(results[et])) for et in event_types if len(results[et]) < len(expected)
-        }
-        await raise_with_market_context(
-            session, exchanges, ValueError(f"Timeout after {timeout}s. Missing data: {missing_info}")
-        )
-    return results
 
 
 async def stream_quotes_with_trade_fallback(

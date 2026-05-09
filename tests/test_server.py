@@ -349,72 +349,6 @@ class TestMarketStatusTool:
 class TestOrderTools:
     """Tests for order tool orchestration."""
 
-    @staticmethod
-    def order_response(order_id: str):
-        order = Mock()
-        order.id = order_id
-        order.legs = []
-        order.model_dump.return_value = {"id": order_id, "status": "Live", "price": Decimal("-1.10")}
-        return SimpleNamespace(
-            order=order,
-            buying_power_effect=None,
-            fee_calculation=None,
-            warnings=None,
-            errors=None,
-        )
-
-    @pytest.mark.asyncio
-    async def test_place_chase_recalculates_fresh_price_each_retry(self):
-        broker_leg = Leg(
-            instrument_type=InstrumentType.EQUITY,
-            symbol="AAPL",
-            action=OrderAction.BUY_TO_OPEN,
-            quantity=1,
-        )
-        live_order = Mock(id="12345", time_in_force=OrderTimeInForce.DAY, legs=[broker_leg])
-        account = Mock()
-        account.place_order = AsyncMock(return_value=self.order_response("12345"))
-        account.get_live_orders = AsyncMock(return_value=[live_order])
-        account.replace_order = AsyncMock(return_value=self.order_response("12345"))
-
-        mock_ctx = Mock()
-        mock_ctx.request_context = Mock()
-        mock_ctx.request_context.lifespan_context = Mock(session=Mock(), account=account)
-        leg = OrderLeg(symbol="AAPL", action=OrderAction.BUY_TO_OPEN)
-
-        with (
-            patch(
-                "tasty_agent.server._resolve_order_inputs",
-                new=AsyncMock(return_value=([Mock()], [leg], Decimal("-1.10"), None)),
-            ),
-            patch("tasty_agent.server.build_order_legs", return_value=[broker_leg]),
-            patch(
-                "tasty_agent.server._resolve_replacement_market_price",
-                new=AsyncMock(side_effect=[Decimal("-1.11"), Decimal("-1.12")]),
-            ) as resolve_replacement,
-            patch("tasty_agent.server.get_order_leg_instrument_details", new=AsyncMock(return_value=[Mock()])),
-            patch("tasty_agent.server._fetch_order_market", new=AsyncMock(return_value=Mock())),
-            patch("tasty_agent.server.order_price_tick_cents", return_value=1),
-            patch("tasty_agent.server.CHASE_MAX_ATTEMPTS", 2),
-            patch("tasty_agent.server.CHASE_INTERVAL_SECONDS", 0),
-            patch("tasty_agent.server.rate_limiter", NoopLimiter()),
-            patch("tasty_agent.server.asyncio.sleep", new=AsyncMock()),
-        ):
-            result = parse_tool_xml(await place_order(mock_ctx, legs=[leg], chase=True), "order")
-
-        assert result["chase"] == {
-            "status": "still_live",
-            "checks": 2,
-            "reprices": 2,
-            "order_id": "12345",
-            "last_step_ticks": 2,
-            "last_tick_cents": 1,
-            "last_price": "-1.12",
-        }
-        assert [call.kwargs["offset_cents"] for call in resolve_replacement.await_args_list] == [1, 2]
-        assert account.get_live_orders.await_count == 2
-        assert account.replace_order.await_count == 2
-
     @pytest.mark.asyncio
     async def test_place_order_does_not_accept_manual_price(self):
         mock_ctx = Mock()
@@ -605,58 +539,6 @@ class TestOrderPricing:
         assert price == Decimal("-0.55")
         assert warnings == []
 
-    def test_mid_toward_natural_moves_by_offset_cents(self):
-        leg = OrderLeg(symbol="AAPL", action=OrderAction.BUY_TO_OPEN, quantity=1)
-        market = build_order_market([self.detail("AAPL")], [leg], [self.quote("1.00", "1.20")])
-
-        price, warnings = resolve_order_price(
-            market,
-            PricingPolicy(mode="mid_toward_natural", offset_cents=2),
-        )
-
-        assert price == Decimal("-1.12")
-        assert warnings == []
-
-    def test_manual_underlying_stock_price_is_rejected_for_option_order(self):
-        leg = OrderLeg(
-            symbol="AAPL",
-            action=OrderAction.BUY_TO_OPEN,
-            quantity=1,
-            option_type="C",
-            strike_price=150.0,
-            expiration_date="2026-12-18",
-        )
-        market = build_order_market([self.detail(".AAPL261218C150")], [leg], [self.quote("1.00", "1.20")])
-
-        with pytest.raises(ValueError, match="outside the current order market"):
-            resolve_order_price(market, PricingPolicy(), manual_price=150.00)
-
-    def test_manual_price_far_from_mid_returns_warning(self):
-        leg = OrderLeg(symbol="AAPL", action=OrderAction.BUY_TO_OPEN, quantity=1)
-        market = build_order_market([self.detail("AAPL")], [leg], [self.quote("1.00", "1.20")])
-
-        price, warnings = resolve_order_price(market, PricingPolicy(), manual_price=-1.18)
-
-        assert price == Decimal("-1.18")
-        assert len(warnings) == 1
-        assert "warning threshold" in warnings[0]
-
-    def test_mid_warning_threshold_scales_with_wide_spreads(self):
-        leg = OrderLeg(symbol="AAPL", action=OrderAction.BUY_TO_OPEN, quantity=1)
-        market = build_order_market([self.detail("AAPL")], [leg], [self.quote("1.00", "1.80")])
-
-        price, warnings = resolve_order_price(market, PricingPolicy(), manual_price=-1.55)
-
-        assert price == Decimal("-1.55")
-        assert warnings == []
-
-    def test_manual_boundary_price_rejected_when_inside_cent_exists(self):
-        leg = OrderLeg(symbol="AAPL", action=OrderAction.BUY_TO_OPEN, quantity=1)
-        market = build_order_market([self.detail("AAPL")], [leg], [self.quote("1.00", "1.20")])
-
-        with pytest.raises(ValueError, match="strictly inside"):
-            resolve_order_price(market, PricingPolicy(), manual_price=-1.20)
-
     def test_crossed_quote_rejected(self):
         leg = OrderLeg(symbol="AAPL", action=OrderAction.BUY_TO_OPEN, quantity=1)
 
@@ -673,13 +555,6 @@ class TestOrderPricing:
         assert price == Decimal("-100.25")
         assert warnings == []
 
-    def test_manual_price_must_align_to_instrument_tick(self):
-        leg = OrderLeg(symbol="/ESM26", action=OrderAction.BUY, quantity=1)
-        market = build_order_market([self.future_detail("/ESM26")], [leg], [self.quote("100.00", "100.50")])
-
-        with pytest.raises(ValueError, match="order tick"):
-            resolve_order_price(market, PricingPolicy(), manual_price=-100.10)
-
     def test_option_tick_sizes_are_used_when_available(self):
         leg = OrderLeg(
             symbol="AAPL",
@@ -694,6 +569,29 @@ class TestOrderPricing:
         market = build_order_market([detail], [leg], [self.quote("1.00", "1.20")])
 
         assert market.tick_size == Decimal("0.05")
+
+    def test_option_tick_sizes_accept_pydantic_dump_shape(self):
+        leg = OrderLeg(
+            symbol="TQQQ",
+            action=OrderAction.BUY_TO_OPEN,
+            option_type="C",
+            strike_price=65.0,
+            expiration_date="2027-01-15",
+        )
+        detail = self.option_detail(".TQQQ270115C65")
+        detail.tick_sizes = [
+            {"value": Decimal("0.01"), "threshold": None},
+            {"value": Decimal("0.05"), "threshold": Decimal("3.00")},
+        ]
+        market = build_order_market([detail], [leg], [self.quote("19.67", "19.69")])
+
+        price, warnings = resolve_order_price(market, PricingPolicy())
+
+        assert market.mid_price == Decimal("-19.68")
+        assert market.tick_size == Decimal("0.05")
+        assert price == Decimal("-19.70")
+        assert len(warnings) == 1
+        assert "nearest valid tick" in warnings[0]
 
     def test_mid_policy_rounds_to_nearest_option_tick(self):
         leg = OrderLeg(
@@ -714,6 +612,19 @@ class TestOrderPricing:
         assert price == Decimal("-1.10")
         assert len(warnings) == 1
         assert "nearest valid tick" in warnings[0]
+
+    def test_option_pricing_requires_tick_sizes(self):
+        leg = OrderLeg(
+            symbol="AAPL",
+            action=OrderAction.BUY_TO_OPEN,
+            option_type="C",
+            strike_price=150.0,
+            expiration_date="2026-12-18",
+        )
+        detail = self.option_detail(".AAPL261218C150")
+
+        with pytest.raises(ValueError, match="Missing option tick sizes"):
+            build_order_market([detail], [leg], [self.quote("1.11", "1.13")])
 
     def test_target_value_sizes_option_contract_quantity(self):
         leg = OrderLeg(symbol="TSLA", action=OrderAction.BUY_TO_OPEN)

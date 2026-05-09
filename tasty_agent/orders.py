@@ -117,21 +117,8 @@ class OrderLeg(BaseModel):
 
 
 class PricingPolicy(BaseModel):
-    """Intent-based limit pricing for new orders."""
+    """Guardrails for quote-derived mid limit pricing."""
 
-    mode: Literal["mid", "mid_toward_natural"] = Field(
-        "mid",
-        description=(
-            "How the tool should price the order from live quotes. "
-            "'mid' uses the current signed net midpoint. "
-            "'mid_toward_natural' moves from mid toward the marketable natural price by offset_cents."
-        ),
-    )
-    offset_cents: int = Field(
-        0,
-        ge=0,
-        description="For mode='mid_toward_natural', move this many cents from mid toward the natural price.",
-    )
     mid_distance_warning_cents: int | None = Field(
         5,
         ge=0,
@@ -148,12 +135,6 @@ class PricingPolicy(BaseModel):
             "The effective warning threshold is max(mid_distance_warning_cents, spread * this fraction)."
         ),
     )
-
-    @model_validator(mode="after")
-    def validate_offset_for_mode(self) -> PricingPolicy:
-        if self.mode == "mid" and self.offset_cents:
-            raise ValueError("offset_cents is only valid when mode='mid_toward_natural'.")
-        return self
 
 
 class OrderSizingPolicy(BaseModel):
@@ -181,8 +162,6 @@ class OrderSizingResult:
 
 def default_pricing_policy() -> PricingPolicy:
     return PricingPolicy(
-        mode="mid",
-        offset_cents=0,
         mid_distance_warning_cents=5,
         mid_distance_warning_spread_fraction=0.25,
     )
@@ -294,19 +273,24 @@ def _tick_from_table(tick_sizes: list[Any] | None, price: Decimal) -> Decimal | 
     if not tick_sizes or not isinstance(tick_sizes, list | tuple):
         return None
 
+    def tick_value(tick: Any, field: str) -> Any:
+        if isinstance(tick, dict):
+            return tick.get(field)
+        return getattr(tick, field, None)
+
     absolute_price = abs(price)
     threshold_matches = [
         tick
         for tick in tick_sizes
-        if getattr(tick, "threshold", None) is not None and absolute_price >= Decimal(str(tick.threshold))
+        if tick_value(tick, "threshold") is not None and absolute_price >= Decimal(str(tick_value(tick, "threshold")))
     ]
     if threshold_matches:
-        tick = max(threshold_matches, key=lambda item: Decimal(str(item.threshold)))
-        return Decimal(str(tick.value))
+        tick = max(threshold_matches, key=lambda item: Decimal(str(tick_value(item, "threshold"))))
+        return Decimal(str(tick_value(tick, "value")))
 
-    thresholdless = [tick for tick in tick_sizes if getattr(tick, "threshold", None) is None]
+    thresholdless = [tick for tick in tick_sizes if tick_value(tick, "threshold") is None]
     if thresholdless:
-        return Decimal(str(thresholdless[0].value))
+        return Decimal(str(tick_value(thresholdless[0], "value")))
     return None
 
 
@@ -320,6 +304,11 @@ def _instrument_tick_size(detail: InstrumentDetail, price: Decimal) -> Decimal:
         return Decimal(str(instrument.tick_size))
 
     tick_size = _tick_from_table(getattr(instrument, "tick_sizes", None), price)
+    if isinstance(instrument, Option) and tick_size is None:
+        raise ValueError(
+            f"Missing option tick sizes for {describe_instrument(detail)}. "
+            "Cannot safely round the order price to the broker's tick grid."
+        )
     return tick_size or CENT
 
 
@@ -331,7 +320,7 @@ def order_price_tick_size(
         _instrument_tick_size(detail, leg_quote.mid)
         for detail, leg_quote in zip(instrument_details, leg_quotes, strict=True)
     ]
-    return min(ticks) if ticks else CENT
+    return max(ticks) if ticks else CENT
 
 
 def order_price_tick_cents(instrument_details: list[InstrumentDetail], market: OrderMarket) -> int:
@@ -425,26 +414,8 @@ def build_order_market(
     )
 
 
-def _manual_price_to_decimal(price: float | Decimal, tick_size: Decimal) -> Decimal:
-    candidate = _to_decimal_price(price, "manual limit price")
-    rounded = _round_to_tick(candidate, tick_size)
-    if candidate != rounded:
-        raise ValueError(
-            f"Manual limit price {format_signed_money(candidate)} is not aligned to the current "
-            f"${tick_size.quantize(CENT):.2f} order tick. "
-            "Omit manual pricing so the tool computes a valid mid limit from live quotes."
-        )
-    return _round_to_cent(rounded)
-
-
-def _policy_price(market: OrderMarket, pricing: PricingPolicy) -> Decimal:
-    if pricing.mode == "mid":
-        raw_price = market.mid_price
-    else:
-        offset = Decimal(pricing.offset_cents) / Decimal("100")
-        max_offset = max(market.mid_price - market.natural_price, Decimal("0"))
-        raw_price = market.mid_price - min(offset, max_offset)
-
+def _mid_price(market: OrderMarket) -> Decimal:
+    raw_price = market.mid_price
     candidate = _round_to_cent(_round_to_tick(raw_price, market.tick_size))
     if not _has_tick_price_inside(market):
         return candidate
@@ -507,14 +478,9 @@ def _validate_limit_price(
 def resolve_order_price(
     market: OrderMarket,
     pricing: PricingPolicy,
-    manual_price: float | Decimal | None = None,
 ) -> tuple[Decimal, list[str]]:
     """Resolve and validate the final signed limit price for an order."""
-    candidate = (
-        _manual_price_to_decimal(manual_price, market.tick_size)
-        if manual_price is not None
-        else _policy_price(market, pricing)
-    )
+    candidate = _mid_price(market)
     warnings = _validate_limit_price(market, candidate, pricing)
     return candidate, warnings
 
