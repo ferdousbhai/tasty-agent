@@ -404,7 +404,8 @@ async def place_order(
     No manual limit price is accepted.
 
     For options, set symbol to the underlying and include option_type, strike_price, expiration_date.
-    Multi-leg quantities are ratios when target_value is set.
+    Quantity is the actual share/contract count. With target_value, omit quantity for single-leg orders;
+    for multi-leg spreads, use quantity only to express the leg ratio, such as 1:1 or 2:1.
 
     Args:
         legs: Equities/options use Buy/Sell to Open/Close; futures use Buy/Sell.

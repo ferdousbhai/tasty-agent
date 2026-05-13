@@ -26,7 +26,7 @@ Interact with TastyTrade brokerage accounts via the tasty-agent MCP server. Cove
 - Equity and option legs use `Buy to Open`, `Buy to Close`, `Sell to Open`, `Sell to Close`; futures use `Buy` or `Sell`.
 - `place_order` always uses quote-derived mid pricing; do not pass raw prices.
 - `place_order` aligns prices to the broker's valid tick grid; do not retry unchanged if tick-size data is unavailable.
-- For dollar-budget orders, pass top-level `target_value`. With `target_value`, leg quantity is a ratio and usually omitted/defaults to 1.
+- `quantity` is the actual share/contract count. For dollar-budget orders, pass top-level `target_value` and omit `quantity` for single-leg orders. For multi-leg spreads with `target_value`, use `quantity` only to express the leg ratio, such as 1:1 or 2:1.
 - For replacing an order, call `replace_order(order_id)` to reprice at current mid.
 - Do not use underlying stock quotes as option order prices. `place_order` resolves the exact instrument quote and validates the signed net limit against the current bid/ask market.
 - Tool outputs are intentionally compact; use the returned bid/ask/mid, sizing, warnings, and order summaries rather than expecting full SDK dumps.

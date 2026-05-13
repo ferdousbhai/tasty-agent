@@ -85,7 +85,10 @@ class OrderLeg(BaseModel):
     quantity: int = Field(
         1,
         ge=1,
-        description="Shares/contracts; with target_value this is a leg ratio, usually 1.",
+        description=(
+            "Actual share/contract count. For target_value sizing, omit quantity for single-leg orders; "
+            "for multi-leg spreads, use quantity only to express the leg ratio, such as 1:1 or 2:1."
+        ),
     )
     option_type: Literal["C", "P"] | None = Field(None, description="C=call, P=put; required for options.")
     strike_price: float | None = Field(None, description="Required for options.")

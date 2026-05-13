@@ -29,7 +29,7 @@ A Model Context Protocol server for TastyTrade brokerage accounts. Enables LLMs 
 
 ### Order Management
 - **`place_order(legs, target_value=None, time_in_force="Day", dry_run=false)`** - Place multi-leg orders with quote-derived mid pricing only. The tool fetches live quotes for the exact resolved instruments, computes the signed net mid, validates the final limit against bid/ask guardrails, and optionally sizes quantity from `target_value`.
-  - `target_value=50000` sizes an equity or equity-option order from quote-derived pricing. With `target_value`, leg `quantity` is a ratio and usually omitted/defaults to `1`.
+  - `quantity` is the actual share/contract count. `target_value=50000` sizes an equity or equity-option order from quote-derived pricing; omit `quantity` for single-leg target-value orders. For multi-leg spreads with `target_value`, use `quantity` only to express the leg ratio, such as 1:1 or 2:1.
   - Order prices are aligned to the broker's valid tick grid before submission. Option orders require tastytrade option tick-size data; if it is unavailable, the tool fails before placement instead of submitting an invalid price increment.
   - Order actions follow the tastytrade Python SDK contract: equities and options use `Buy to Open`, `Buy to Close`, `Sell to Open`, or `Sell to Close`; futures use `Buy` or `Sell`.
 - **`replace_order(order_id)`** - Reprice an existing live order at the current quote-derived mid.

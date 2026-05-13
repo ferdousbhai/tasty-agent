@@ -659,6 +659,24 @@ class TestOrderPricing:
         assert sizing_result.quantity == 200
         assert sizing_result.unit_value == Decimal("250")
 
+    def test_target_value_scales_multi_leg_spread_ratio(self):
+        buy_leg = OrderLeg(symbol="TSLA", action=OrderAction.BUY_TO_OPEN, quantity=2)
+        sell_leg = OrderLeg(symbol="TSLA", action=OrderAction.SELL_TO_OPEN, quantity=1)
+        sizing = OrderSizingPolicy(target_value=Decimal("50000"), min_quantity=1, max_quantity=None)
+
+        sized_legs, sizing_result = apply_order_sizing(
+            [self.option_detail("TSLA_300C"), self.option_detail("TSLA_320C")],
+            [buy_leg, sell_leg],
+            Decimal("-5"),
+            sizing,
+        )
+
+        assert [leg.quantity for leg in sized_legs] == [200, 100]
+        assert sizing_result is not None
+        assert sizing_result.quantity == 100
+        assert sizing_result.unit_value == Decimal("500")
+        assert sizing_result.estimated_value == Decimal("50000")
+
     def test_target_value_requires_reduced_leg_ratio(self):
         leg = OrderLeg(symbol="TSLA", action=OrderAction.BUY_TO_OPEN, quantity=17)
         sizing = OrderSizingPolicy(target_value=Decimal("50000"), min_quantity=1, max_quantity=None)
@@ -721,6 +739,14 @@ class TestPydanticModels:
     def test_order_leg_accepts_valid_action_contract(self, kwargs, expected_action):
         leg = OrderLeg(**kwargs)
         assert leg.action == expected_action
+
+    def test_order_leg_quantity_description_distinguishes_contracts_and_target_value(self):
+        description = OrderLeg.model_fields["quantity"].description
+
+        assert description is not None
+        assert "Actual share/contract count" in description
+        assert "omit quantity for single-leg orders" in description
+        assert "leg ratio" in description
 
     @pytest.mark.parametrize(
         ("kwargs", "message"),
