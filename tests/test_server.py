@@ -10,7 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
-from tastytrade.instruments import Equity, Future, Option, OptionType
+from tastytrade.instruments import Equity, Future, Option, OptionType, TickSize
 from tastytrade.market_sessions import ExchangeType, MarketStatus
 from tastytrade.order import InstrumentType, Leg, OrderAction, OrderTimeInForce
 
@@ -358,6 +358,88 @@ class TestOrderTools:
             await place_order(mock_ctx, legs=[leg], price=-1.10)  # type: ignore[call-arg]
 
     @pytest.mark.asyncio
+    async def test_place_order_target_value_uses_asset_option_tick_sizes_for_msft_call(self):
+        account = Mock()
+        account.place_order = AsyncMock(
+            return_value=SimpleNamespace(
+                order=None,
+                buying_power_effect=None,
+                fee_calculation=None,
+                warnings=None,
+                errors=None,
+            )
+        )
+        mock_ctx = Mock()
+        mock_ctx.info = AsyncMock()
+        mock_ctx.warning = AsyncMock()
+        mock_ctx.request_context = Mock()
+        mock_ctx.request_context.lifespan_context = Mock(session=Mock(), account=account)
+
+        option = Option.model_construct(
+            instrument_type=InstrumentType.EQUITY_OPTION,
+            symbol=".MSFT280121C450",
+            streamer_symbol=".MSFT280121C450",
+            underlying_symbol="MSFT",
+            shares_per_contract=100,
+            option_type=OptionType.CALL,
+            strike_price=450.0,
+            expiration_date=date(2028, 1, 21),
+        )
+        underlying = Equity.model_construct(
+            instrument_type=InstrumentType.EQUITY,
+            symbol="MSFT",
+            streamer_symbol="MSFT",
+            option_tick_sizes=[
+                TickSize(value=Decimal("0.01"), threshold=None),
+                TickSize(value=Decimal("0.05"), threshold=Decimal("3.00")),
+            ],
+        )
+        quote = SimpleNamespace(bid_price=Decimal("61.65"), ask_price=Decimal("65.00"))
+        leg = OrderLeg(
+            symbol="MSFT",
+            action=OrderAction.BUY_TO_OPEN,
+            option_type="C",
+            strike_price=450.0,
+            expiration_date="2028-01-21",
+        )
+        built_leg = Leg(
+            instrument_type=InstrumentType.EQUITY_OPTION,
+            symbol=".MSFT280121C450",
+            action=OrderAction.BUY_TO_OPEN,
+            quantity=Decimal("7"),
+        )
+
+        with (
+            patch("tasty_agent.orders.get_cached_option_chain", new=AsyncMock(return_value={date(2028, 1, 21): [option]})),
+            patch("tasty_agent.orders.Equity.get", new=AsyncMock(return_value=underlying)),
+            patch("tasty_agent.server._stream_events", new=AsyncMock(return_value=[quote])),
+            patch("tasty_agent.server.rate_limiter", NoopLimiter()),
+            patch.object(Option, "build_leg", autospec=True, return_value=built_leg) as build_leg,
+        ):
+            result = parse_tool_xml(
+                await place_order(mock_ctx, legs=[leg], target_value=50000, dry_run=True),
+                "order",
+            )
+
+        assert result == {
+            "sizing": {
+                "target_value": "50000",
+                "unit_value": "6335",
+                "quantity": 7,
+                "estimated_value": "44345",
+            }
+        }
+        account.place_order.assert_awaited_once()
+        placed_order = account.place_order.call_args.args[1]
+        assert placed_order.price == Decimal("-63.35")
+        assert placed_order.legs == [built_leg]
+        assert account.place_order.call_args.kwargs["dry_run"] is True
+        build_leg.assert_called_once_with(option, Decimal("7"), OrderAction.BUY_TO_OPEN)
+        mock_ctx.info.assert_any_await(
+            "Resolved limit price -$63.35 from mid (natural=-$65.00, mid=-$63.32, passive=-$61.65, spread=$3.35, tick=$0.05)."
+        )
+
+    @pytest.mark.asyncio
     async def test_replace_uses_guarded_resolved_price(self):
         account = Mock()
         account.replace_order = AsyncMock(
@@ -570,7 +652,7 @@ class TestOrderPricing:
 
         assert market.tick_size == Decimal("0.05")
 
-    def test_option_tick_sizes_accept_pydantic_dump_shape(self):
+    def test_option_tick_sizes_use_tastytrade_asset_model(self):
         leg = OrderLeg(
             symbol="TQQQ",
             action=OrderAction.BUY_TO_OPEN,
@@ -580,8 +662,8 @@ class TestOrderPricing:
         )
         detail = self.option_detail(".TQQQ270115C65")
         detail.tick_sizes = [
-            {"value": Decimal("0.01"), "threshold": None},
-            {"value": Decimal("0.05"), "threshold": Decimal("3.00")},
+            TickSize(value=Decimal("0.01"), threshold=None),
+            TickSize(value=Decimal("0.05"), threshold=Decimal("3.00")),
         ]
         market = build_order_market([detail], [leg], [self.quote("19.67", "19.69")])
 

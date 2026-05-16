@@ -12,7 +12,7 @@ from aiocache import Cache, cached
 from aiocache.serializers import PickleSerializer
 from pydantic import BaseModel, Field, model_validator
 from tastytrade import Session
-from tastytrade.instruments import Equity, Future, Option, get_option_chain
+from tastytrade.instruments import Equity, Future, Option, TickSize, get_option_chain
 from tastytrade.order import InstrumentType, NewOrder, OrderAction, OrderTimeInForce, OrderType
 
 logger = logging.getLogger(__name__)
@@ -40,7 +40,7 @@ class InstrumentDetail:
     streamer_symbol: str
     instrument: Equity | Option | Future
     is_index: bool = False
-    tick_sizes: list[Any] | None = None
+    tick_sizes: list[TickSize] | None = None
 
 
 class InstrumentSpec(BaseModel):
@@ -272,41 +272,33 @@ def _has_tick_price_inside(market: OrderMarket) -> bool:
     return market.spread > market.tick_size
 
 
-def _tick_from_table(tick_sizes: list[Any] | None, price: Decimal) -> Decimal | None:
+def _asset_tick_size(tick_sizes: list[TickSize] | None, price: Decimal) -> Decimal | None:
+    """Resolve the valid tick from tastytrade asset tick-size data."""
     if not tick_sizes or not isinstance(tick_sizes, list | tuple):
         return None
 
-    def tick_value(tick: Any, field: str) -> Any:
-        if isinstance(tick, dict):
-            return tick.get(field)
-        return getattr(tick, field, None)
-
     absolute_price = abs(price)
-    threshold_matches = [
-        tick
-        for tick in tick_sizes
-        if tick_value(tick, "threshold") is not None and absolute_price >= Decimal(str(tick_value(tick, "threshold")))
-    ]
+    threshold_matches = [tick for tick in tick_sizes if tick.threshold is not None and absolute_price >= tick.threshold]
     if threshold_matches:
-        tick = max(threshold_matches, key=lambda item: Decimal(str(tick_value(item, "threshold"))))
-        return Decimal(str(tick_value(tick, "value")))
+        tick = max(threshold_matches, key=lambda item: item.threshold)
+        return tick.value
 
-    thresholdless = [tick for tick in tick_sizes if tick_value(tick, "threshold") is None]
+    thresholdless = [tick for tick in tick_sizes if tick.threshold is None]
     if thresholdless:
-        return Decimal(str(tick_value(thresholdless[0], "value")))
+        return thresholdless[0].value
     return None
 
 
 def _instrument_tick_size(detail: InstrumentDetail, price: Decimal) -> Decimal:
     instrument = detail.instrument
-    tick_size = _tick_from_table(detail.tick_sizes, price)
+    tick_size = _asset_tick_size(detail.tick_sizes, price)
     if tick_size:
         return tick_size
 
     if isinstance(instrument, Future):
         return Decimal(str(instrument.tick_size))
 
-    tick_size = _tick_from_table(getattr(instrument, "tick_sizes", None), price)
+    tick_size = _asset_tick_size(getattr(instrument, "tick_sizes", None), price)
     if isinstance(instrument, Option) and tick_size is None:
         raise ValueError(
             f"Missing option tick sizes for {describe_instrument(detail)}. "
