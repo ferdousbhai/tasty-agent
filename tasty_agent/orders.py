@@ -299,12 +299,15 @@ def _instrument_tick_size(detail: InstrumentDetail, price: Decimal) -> Decimal:
         return Decimal(str(instrument.tick_size))
 
     tick_size = _asset_tick_size(getattr(instrument, "tick_sizes", None), price)
-    if isinstance(instrument, Option) and tick_size is None:
+    if tick_size:
+        return tick_size
+
+    if isinstance(instrument, Option):
         raise ValueError(
             f"Missing option tick sizes for {describe_instrument(detail)}. "
             "Cannot safely round the order price to the broker's tick grid."
         )
-    return tick_size or CENT
+    return CENT
 
 
 def order_price_tick_size(
@@ -411,13 +414,13 @@ def build_order_market(
 
 def _mid_price(market: OrderMarket) -> Decimal:
     raw_price = market.mid_price
-    candidate = _round_to_cent(_round_to_tick(raw_price, market.tick_size))
+    candidate = _round_to_tick(raw_price, market.tick_size)
     if not _has_tick_price_inside(market):
         return candidate
     if candidate <= market.natural_price:
-        return _round_to_cent(_round_to_tick(market.natural_price + market.tick_size, market.tick_size))
+        return _round_to_tick(market.natural_price + market.tick_size, market.tick_size)
     if candidate >= market.passive_price:
-        return _round_to_cent(_round_to_tick(market.passive_price - market.tick_size, market.tick_size))
+        return _round_to_tick(market.passive_price - market.tick_size, market.tick_size)
     return candidate
 
 

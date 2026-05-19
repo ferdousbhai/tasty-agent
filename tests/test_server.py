@@ -637,6 +637,36 @@ class TestOrderPricing:
         assert price == Decimal("-100.25")
         assert warnings == []
 
+    def test_equity_tick_sizes_use_tastytrade_asset_model(self):
+        leg = OrderLeg(symbol="PENNY", action=OrderAction.BUY_TO_OPEN, quantity=100)
+        detail = self.equity_detail("PENNY")
+        detail.instrument.tick_sizes = [
+            TickSize(value=Decimal("0.0001"), threshold=None),
+            TickSize(value=Decimal("0.01"), threshold=Decimal("1.00")),
+        ]
+        market = build_order_market([detail], [leg], [self.quote("0.1234", "0.1236")])
+
+        price, warnings = resolve_order_price(market, PricingPolicy())
+
+        assert market.tick_size == Decimal("0.0001")
+        assert price == Decimal("-0.1235")
+        assert warnings == []
+
+    def test_equity_tick_sizes_apply_thresholds_from_asset_model(self):
+        leg = OrderLeg(symbol="AAPL", action=OrderAction.BUY_TO_OPEN, quantity=100)
+        detail = self.equity_detail("AAPL")
+        detail.instrument.tick_sizes = [
+            TickSize(value=Decimal("0.0001"), threshold=None),
+            TickSize(value=Decimal("0.01"), threshold=Decimal("1.00")),
+        ]
+        market = build_order_market([detail], [leg], [self.quote("189.991", "190.009")])
+
+        price, warnings = resolve_order_price(market, PricingPolicy())
+
+        assert market.tick_size == Decimal("0.01")
+        assert price == Decimal("-190.00")
+        assert warnings == []
+
     def test_option_tick_sizes_are_used_when_available(self):
         leg = OrderLeg(
             symbol="AAPL",
