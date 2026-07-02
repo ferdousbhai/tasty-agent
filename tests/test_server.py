@@ -17,6 +17,9 @@ from tastytrade.order import InstrumentType, Leg, OrderAction, OrderTimeInForce
 from tasty_agent.account_helpers import _compact_positions
 from tasty_agent.core import to_table
 from tasty_agent.market_data import (
+    collect_open_interest as _collect_open_interest,
+)
+from tasty_agent.market_data import (
     exchanges_for_symbols as _exchanges_for_symbols,
 )
 from tasty_agent.market_data import (
@@ -1094,6 +1097,64 @@ class TestStreamEvents:
             result = await _stream_events(mock_session, Quote, ["AAPL", "TSLA"], timeout=5.0)
 
         assert result == [event_a, event_b]
+
+
+class TestCollectOpenInterest:
+    """Tests for collect_open_interest — best-effort OI collection for get_quotes."""
+
+    @pytest.mark.asyncio
+    async def test_empty_symbols_returns_empty_without_streaming(self):
+        """No option symbols → no streamer is opened and an empty map is returned."""
+        with patch("tasty_agent.market_data.DXLinkStreamer") as streamer_cls:
+            result = await _collect_open_interest(Mock(), [], timeout=5.0)
+        assert result == {}
+        streamer_cls.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_collects_open_interest_by_symbol(self):
+        """Summary events are mapped symbol → int(open_interest)."""
+        summ_a = Mock(event_symbol=".NVDA260821P195", open_interest=1234)
+        summ_b = Mock(event_symbol=".NVDA260821P180", open_interest=Decimal("560"))
+        events = [summ_a, summ_b]
+        call_count = 0
+
+        async def fake_get_event(_):
+            nonlocal call_count
+            event = events[call_count]
+            call_count += 1
+            return event
+
+        mock_streamer = AsyncMock()
+        mock_streamer.__aenter__ = AsyncMock(return_value=mock_streamer)
+        mock_streamer.__aexit__ = AsyncMock(return_value=False)
+        mock_streamer.subscribe = AsyncMock()
+        mock_streamer.get_event = fake_get_event
+
+        with patch("tasty_agent.market_data.DXLinkStreamer", return_value=mock_streamer):
+            result = await _collect_open_interest(
+                Mock(), [".NVDA260821P195", ".NVDA260821P180"], timeout=5.0
+            )
+
+        assert result == {".NVDA260821P195": 1234, ".NVDA260821P180": 560}
+
+    @pytest.mark.asyncio
+    async def test_timeout_returns_partial_without_raising(self):
+        """A slow/missing Summary must not fail the quote — return what arrived."""
+        mock_session = Mock()
+
+        async def block_forever(_):
+            await asyncio.sleep(999)
+
+        mock_streamer = AsyncMock()
+        mock_streamer.__aenter__ = AsyncMock(return_value=mock_streamer)
+        mock_streamer.__aexit__ = AsyncMock(return_value=False)
+        mock_streamer.subscribe = AsyncMock()
+        mock_streamer.get_event = block_forever
+
+        with patch("tasty_agent.market_data.DXLinkStreamer", return_value=mock_streamer):
+            result = await _collect_open_interest(mock_session, [".NVDA260821P195"], timeout=0.1)
+
+        assert result == {}
 
     @pytest.mark.asyncio
     async def test_exceptiongroup_from_streamer_cleanup_produces_valueerror(self):

@@ -19,6 +19,9 @@ from tastytrade.utils import now_in_new_york
 from tasty_agent.account_helpers import build_account_overview, fetch_history
 from tasty_agent.core import compact_row, compact_value, get_context, get_session, lifespan, to_table
 from tasty_agent.market_data import (
+    collect_open_interest as _collect_open_interest,
+)
+from tasty_agent.market_data import (
     get_next_open_time as _get_next_open_time,
 )
 from tasty_agent.market_data import (
@@ -463,6 +466,9 @@ async def get_quotes(ctx: Context, instruments: list[InstrumentSpec], timeout: f
     """
     Get live quotes for stocks, options, futures, and indices.
 
+    For options, an `oi` (open interest) column is included when available — useful for
+    locating where positioning concentrates (e.g. which strike/expiry holds a gamma wall).
+
     Args:
         instruments: Use symbol only for stocks/futures; set instrument_type="Index" for SPX/VIX/NDX; add option fields for options.
         timeout: Seconds to wait for DXLink data.
@@ -474,12 +480,26 @@ async def get_quotes(ctx: Context, instruments: list[InstrumentSpec], timeout: f
     instrument_details = await get_instrument_details(session, instruments)
     streamer_symbols = [d.streamer_symbol for d in instrument_details]
     index_symbols = {d.streamer_symbol for d in instrument_details if d.is_index}
+    option_symbols = [d.streamer_symbol for d in instrument_details if d.is_option]
 
     if index_symbols:
         events = await _stream_quotes_with_trade_fallback(session, streamer_symbols, index_symbols, timeout)
     else:
         events = await _stream_events(session, Quote, streamer_symbols, timeout)
-    return tool_xml("get_quotes", to_table([_compact_quote_event(event) for event in events]))
+
+    # Open interest rides on a separate DXLink Summary event; collect it best-effort for
+    # options only (stocks/indices have none) so a missing Summary never fails the quote.
+    oi_by_symbol = await _collect_open_interest(session, option_symbols, min(timeout, 6.0))
+
+    rows = []
+    for event in events:
+        row = _compact_quote_event(event)
+        sym = getattr(event, "event_symbol", None)
+        oi = oi_by_symbol.get(sym) if sym is not None else None
+        if oi is not None:
+            row["oi"] = compact_value(oi)
+        rows.append(row)
+    return tool_xml("get_quotes", to_table(rows))
 
 
 @mcp_app.tool()

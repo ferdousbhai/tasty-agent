@@ -7,7 +7,7 @@ from typing import Any
 
 import humanize
 from tastytrade import Session
-from tastytrade.dxfeed import Greeks, Quote, Trade
+from tastytrade.dxfeed import Greeks, Quote, Summary, Trade
 from tastytrade.market_sessions import ExchangeType, MarketStatus, get_market_sessions
 from tastytrade.streamer import DXLinkStreamer
 
@@ -114,6 +114,38 @@ async def stream_events(
             ValueError(f"Timeout getting quotes after {timeout}s. No data received for: {sorted(missing)}"),
         )
     return [events_by_symbol[s] for s in streamer_symbols]
+
+
+async def collect_open_interest(
+    session: Session,
+    streamer_symbols: list[str],
+    timeout: float,
+) -> dict[str, int]:
+    """Best-effort collection of option open interest via DXLink Summary events.
+
+    Unlike stream_events, this never raises and never blocks a quote: open interest
+    is a supplementary field, so a slow or missing Summary must not fail get_quotes.
+    Returns a partial map of streamer_symbol -> open_interest for whatever arrived
+    within the timeout (symbols still missing are simply omitted).
+    """
+    oi_by_symbol: dict[str, int] = {}
+    if not streamer_symbols:
+        return oi_by_symbol
+    expected = set(streamer_symbols)
+    try:
+        async with DXLinkStreamer(session) as streamer:
+            await streamer.subscribe(Summary, streamer_symbols)
+            try:
+                async with asyncio.timeout(timeout):
+                    while len(oi_by_symbol) < len(expected):
+                        event = await streamer.get_event(Summary)
+                        if event.event_symbol in expected and event.open_interest is not None:
+                            oi_by_symbol[event.event_symbol] = int(event.open_interest)
+            except TimeoutError:
+                pass
+    except Exception:
+        logger.debug("Failed to collect open interest for %s", sorted(expected), exc_info=True)
+    return oi_by_symbol
 
 
 async def stream_quotes_with_trade_fallback(

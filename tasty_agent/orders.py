@@ -50,6 +50,11 @@ class InstrumentDetail:
     is_index: bool = False
     tick_sizes: list[TickSize] | None = None
 
+    @property
+    def is_option(self) -> bool:
+        """True for equity or futures options (the instruments that carry open interest)."""
+        return isinstance(self.instrument, (Option, FutureOption))
+
 
 class InstrumentSpec(BaseModel):
     """Specification for an instrument (stock, option, future, or index)."""
