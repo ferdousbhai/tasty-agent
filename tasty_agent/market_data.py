@@ -131,14 +131,17 @@ async def stream_quotes_with_trade_fallback(
             try:
                 async with asyncio.timeout(timeout):
                     while len(events_by_symbol) < len(expected):
-                        quote_task = asyncio.ensure_future(streamer.get_event(Quote))
-                        trade_task = asyncio.ensure_future(streamer.get_event(Trade))
-                        done, pending = await asyncio.wait(
-                            [quote_task, trade_task],
-                            return_when=asyncio.FIRST_COMPLETED,
+                        tasks = (
+                            asyncio.ensure_future(streamer.get_event(Quote)),
+                            asyncio.ensure_future(streamer.get_event(Trade)),
                         )
-                        for task in pending:
-                            task.cancel()
+                        try:
+                            done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                        finally:
+                            for task in tasks:
+                                if not task.done():
+                                    task.cancel()
+                            await asyncio.gather(*tasks, return_exceptions=True)
                         for task in done:
                             event = task.result()
                             if event.event_symbol in expected:

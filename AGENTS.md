@@ -6,7 +6,7 @@ Prefer `main` — branches/PRs only if asked or for isolated experiments. For sm
 
 ## Rules
 
-- Rate limit is 2 req/s (`aiolimiter`) — do not add parallel SDK calls without throttling.
+- Respect the existing 2 req/s limiter (`aiolimiter`) — do not add parallel SDK calls without throttling.
 - Option chains are cached 24h (`aiocache`) — invalidate explicitly when testing chain changes.
 - Pricing is tick-rounded quote-derived mid — use `orders.py` helpers, do not hand-roll.
 - Keep tool output shape compact (selected fields) — do not return full SDK dumps.

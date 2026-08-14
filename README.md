@@ -1,7 +1,7 @@
 # tasty-agent: A TastyTrade MCP Server
 [![Trust Score](https://archestra.ai/mcp-catalog/api/badge/quality/ferdousbhai/tasty-agent)](https://archestra.ai/mcp-catalog/ferdousbhai__tasty-agent)
 
-A Model Context Protocol server for TastyTrade brokerage accounts. Enables LLMs to monitor portfolios, analyze positions, and execute trades. Features automated IV analysis prompts and built-in rate limiting (2 requests/second) to prevent API errors.
+A Model Context Protocol server for TastyTrade brokerage accounts. Enables LLMs to monitor portfolios, analyze positions, and execute trades. Features automated IV analysis prompts and compact tool output.
 
 ## Authentication
 
@@ -81,7 +81,8 @@ uvx modal setup
 # Create secrets
 uvx modal secret create tasty-agent-secrets \
   TASTYTRADE_CLIENT_SECRET=your_secret \
-  TASTYTRADE_REFRESH_TOKEN=your_token
+  TASTYTRADE_REFRESH_TOKEN=your_token \
+  TASTYTRADE_ACCOUNT_ID=your_account_id  # optional for single-account grants
 
 # Create a proxy auth token at https://modal.com/settings/proxy-auth-tokens
 
@@ -115,14 +116,14 @@ See [`examples/mcp_client.py`](examples/mcp_client.py) for the full client code.
 "Get my account balances and current positions"
 "What's my net liquidating value?"
 "Get real-time quotes for SPY and AAPL"
-"Get quotes for TQQQ C option with strike 100 expiring 2026-01-16"
-"Get Greeks for AAPL P option with strike 150 expiring 2024-12-20"
-"Get Greeks for /ES C option with strike 5800 expiring 2026-05-30"
+"Get quotes for a TQQQ call at strike 100 expiring YYYY-MM-DD" (use a concrete listed expiration)
+"Get Greeks for an AAPL put at strike 150 expiring YYYY-MM-DD" (use a concrete listed expiration)
+"Get Greeks for an /ES call at strike 5800 expiring YYYY-MM-DD" (use a concrete listed expiration)
 "Buy to open 100 AAPL shares at mid"
-"Buy to open 17 TQQQ calls, strike 100, exp 2026-01-16"
-"Buy $50K of TSLA calls, strike 300, exp 2026-01-16"
-"Place a call spread: buy to open AAPL 150C and sell to open AAPL 155C, both exp 2024-12-20"
-"Buy 1 /ESM26 future at mid"
+"Buy to open 17 TQQQ calls at strike 100 expiring YYYY-MM-DD" (use a concrete listed expiration)
+"Buy $50K of TSLA calls at strike 300 expiring YYYY-MM-DD" (use a concrete listed expiration)
+"Place an AAPL 150/155 call spread expiring YYYY-MM-DD" (use a concrete listed expiration)
+"Buy one /ES-CONTRACT future at mid" (use a concrete active contract symbol)
 "Reprice order 12345 at mid"
 "Cancel order 12345"
 "Show my live orders"

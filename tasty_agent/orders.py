@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import ROUND_FLOOR, ROUND_HALF_UP, Decimal
 from math import gcd, isfinite
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from aiocache import Cache, cached
 from aiocache.serializers import PickleSerializer
@@ -54,14 +54,17 @@ class InstrumentDetail:
 class InstrumentSpec(BaseModel):
     """Specification for an instrument (stock, option, future, or index)."""
 
-    symbol: str = Field(..., description="Symbol, e.g. AAPL, /ESH26, SPX.")
-    instrument_type: Literal["Equity", "Future", "Index"] | None = Field(
-        None,
-        description="Omit to infer Equity/Future/Option; use Index for SPX, VIX, NDX.",
-    )
-    option_type: Literal["C", "P"] | None = Field(None, description="C=call, P=put; required for options.")
-    strike_price: float | None = Field(None, description="Required for options.")
-    expiration_date: str | None = Field(None, description="YYYY-MM-DD; required for options.")
+    symbol: Annotated[str, Field(description="Symbol, e.g. AAPL, /ESH26, SPX.")]
+    instrument_type: Annotated[
+        Literal["Equity", "Future", "Index"] | None,
+        Field(description="Omit to infer Equity/Future/Option; use Index for SPX, VIX, NDX."),
+    ] = None
+    option_type: Annotated[
+        Literal["C", "P"] | None,
+        Field(description="C=call, P=put; required for options."),
+    ] = None
+    strike_price: Annotated[float | None, Field(description="Required for options.")] = None
+    expiration_date: Annotated[str | None, Field(description="YYYY-MM-DD; required for options.")] = None
 
     @model_validator(mode="after")
     def validate_instrument_fields(self) -> InstrumentSpec:
@@ -95,22 +98,27 @@ class OptionSpec(BaseModel):
 class OrderLeg(BaseModel):
     """Specification for an order leg."""
 
-    symbol: str = Field(..., description="Underlying stock or future symbol, e.g. AAPL or /ESM26.")
-    action: OrderAction = Field(
-        ...,
-        description="Equities/options: Buy/Sell to Open/Close. Futures: Buy or Sell.",
-    )
-    quantity: int = Field(
-        1,
-        ge=1,
-        description=(
-            "Actual share/contract count. For target_value sizing, omit quantity for single-leg orders; "
-            "for multi-leg spreads, use quantity only to express the leg ratio, such as 1:1 or 2:1."
+    symbol: Annotated[str, Field(description="Underlying stock or future symbol, e.g. AAPL or /ESM26.")]
+    action: Annotated[
+        OrderAction,
+        Field(description="Equities/options: Buy/Sell to Open/Close. Futures: Buy or Sell."),
+    ]
+    quantity: Annotated[
+        int,
+        Field(
+            ge=1,
+            description=(
+                "Actual share/contract count. For target_value sizing, omit quantity for single-leg orders; "
+                "for multi-leg spreads, use quantity only to express the leg ratio, such as 1:1 or 2:1."
+            ),
         ),
-    )
-    option_type: Literal["C", "P"] | None = Field(None, description="C=call, P=put; required for options.")
-    strike_price: float | None = Field(None, description="Required for options.")
-    expiration_date: str | None = Field(None, description="YYYY-MM-DD; required for options.")
+    ] = 1
+    option_type: Annotated[
+        Literal["C", "P"] | None,
+        Field(description="C=call, P=put; required for options."),
+    ] = None
+    strike_price: Annotated[float | None, Field(description="Required for options.")] = None
+    expiration_date: Annotated[str | None, Field(description="YYYY-MM-DD; required for options.")] = None
 
     @model_validator(mode="after")
     def validate_action_for_instrument(self) -> OrderLeg:
@@ -140,22 +148,26 @@ class OrderLeg(BaseModel):
 class PricingPolicy(BaseModel):
     """Guardrails for quote-derived mid limit pricing."""
 
-    mid_distance_warning_cents: int | None = Field(
-        5,
-        ge=0,
-        description=(
-            "Cent floor for warning when the final limit is far from the current signed net mid-price. "
-            "Set null to disable the cent-based warning."
+    mid_distance_warning_cents: Annotated[
+        int | None,
+        Field(
+            ge=0,
+            description=(
+                "Cent floor for warning when the final limit is far from the current signed net mid-price. "
+                "Set null to disable the cent-based warning."
+            ),
         ),
-    )
-    mid_distance_warning_spread_fraction: float | None = Field(
-        0.25,
-        ge=0,
-        description=(
-            "Spread-relative warning threshold for distance from mid. "
-            "The effective warning threshold is max(mid_distance_warning_cents, spread * this fraction)."
+    ] = 5
+    mid_distance_warning_spread_fraction: Annotated[
+        float | None,
+        Field(
+            ge=0,
+            description=(
+                "Spread-relative warning threshold for distance from mid. "
+                "The effective warning threshold is max(mid_distance_warning_cents, spread * this fraction)."
+            ),
         ),
-    )
+    ] = 0.25
 
 
 class OrderSizingPolicy(BaseModel):
@@ -266,10 +278,6 @@ def _to_decimal_price(value: Any, label: str) -> Decimal:
     if not price.is_finite():
         raise ValueError(f"Invalid {label}: {value}")
     return price
-
-
-def _round_to_cent(value: Decimal) -> Decimal:
-    return value.quantize(CENT, rounding=ROUND_HALF_UP)
 
 
 def _round_to_tick(value: Decimal, tick_size: Decimal) -> Decimal:
@@ -488,15 +496,14 @@ def _validate_limit_price(
     if pricing.mid_distance_warning_spread_fraction is not None:
         warning_thresholds.append(market.spread * Decimal(str(pricing.mid_distance_warning_spread_fraction)))
     warning_thresholds.append(market.tick_size)
-    if warning_thresholds:
-        warning_threshold = max(warning_thresholds)
-        distance = abs(candidate - market.mid_price)
-        if distance > warning_threshold:
-            warnings.append(
-                f"Limit price {format_signed_money(candidate)} is ${distance.quantize(CENT):.2f} from mid "
-                f"{format_signed_money(market.mid_price)}; warning threshold is ${warning_threshold.quantize(CENT):.2f}. "
-                "Verify the user intended this aggressive price."
-            )
+    warning_threshold = max(warning_thresholds)
+    distance = abs(candidate - market.mid_price)
+    if distance > warning_threshold:
+        warnings.append(
+            f"Limit price {format_signed_money(candidate)} is ${distance.quantize(CENT):.2f} from mid "
+            f"{format_signed_money(market.mid_price)}; warning threshold is ${warning_threshold.quantize(CENT):.2f}. "
+            "Verify the user intended this aggressive price."
+        )
 
     return warnings
 
@@ -766,15 +773,7 @@ async def get_instrument_details(session: Session, instrument_specs: list[Instru
 
 async def get_option_instrument_details(session: Session, option_specs: list[OptionSpec]) -> list[InstrumentDetail]:
     """Get streamable option details for equity and futures option contracts."""
-
-    async def lookup_single_option(spec: OptionSpec) -> InstrumentDetail:
-        symbol = spec.symbol.upper()
-        instrument_spec = spec.to_instrument_spec()
-        if symbol.startswith("/"):
-            return await _lookup_future_option_detail(session, instrument_spec, symbol)
-        return await _lookup_option_detail(session, instrument_spec, symbol)
-
-    return await asyncio.gather(*[lookup_single_option(spec) for spec in option_specs])
+    return await get_instrument_details(session, [spec.to_instrument_spec() for spec in option_specs])
 
 
 def build_order_legs(instrument_details: list[InstrumentDetail], legs: list[OrderLeg]) -> list:
@@ -796,12 +795,7 @@ def build_order_legs(instrument_details: list[InstrumentDetail], legs: list[Orde
 def describe_instrument(detail: InstrumentDetail) -> str:
     """Build a concise instrument label for errors and logs."""
     instrument = detail.instrument
-    if isinstance(instrument, Option):
-        return (
-            f"{instrument.underlying_symbol} "
-            f"{instrument.option_type.value}{instrument.strike_price} {instrument.expiration_date}"
-        )
-    if isinstance(instrument, FutureOption):
+    if isinstance(instrument, Option | FutureOption):
         return (
             f"{instrument.underlying_symbol} "
             f"{instrument.option_type.value}{instrument.strike_price} {instrument.expiration_date}"

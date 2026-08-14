@@ -16,7 +16,7 @@ from tastytrade.order import OrderTimeInForce
 from tastytrade.search import symbol_search
 from tastytrade.utils import now_in_new_york
 
-from tasty_agent.account_helpers import build_account_overview, fetch_history
+from tasty_agent.account_helpers import build_account_overview, compact_order, fetch_history
 from tasty_agent.core import compact_row, compact_value, get_context, get_session, lifespan, to_table
 from tasty_agent.market_data import (
     get_next_open_time as _get_next_open_time,
@@ -199,38 +199,6 @@ async def _resolve_replacement_market_price(
     return resolved_price
 
 
-def _compact_order_legs(legs: list[Any] | None) -> str:
-    if not legs:
-        raise ValueError("Broker order is missing legs")
-    parts = []
-    for leg in legs:
-        action = compact_value(getattr(leg, "action", None))
-        quantity = compact_value(getattr(leg, "quantity", None))
-        symbol = getattr(leg, "symbol", None)
-        if not action or not quantity or not symbol:
-            raise ValueError("Broker order leg is missing action, quantity, or symbol")
-        parts.append(f"{action} {quantity} {symbol}")
-    return "; ".join(parts)
-
-
-def _compact_order(order) -> dict[str, Any]:
-    data = order.model_dump()
-    row = {
-        "id": compact_value(data.get("id")),
-        "status": compact_value(data.get("status")),
-        "underlying": compact_value(data.get("underlying_symbol")),
-        "type": compact_value(data.get("order_type")),
-        "tif": compact_value(data.get("time_in_force")),
-        "price": compact_value(data.get("price")),
-        "size": compact_value(data.get("size")),
-        "legs": _compact_order_legs(getattr(order, "legs", None)),
-        "received_at": compact_value(data.get("received_at")),
-        "updated_at": compact_value(data.get("updated_at")),
-        "reject_reason": compact_value(data.get("reject_reason")),
-    }
-    return compact_row(row, drop_zero_string=True)
-
-
 def _compact_sizing_result(sizing_result: OrderSizingResult | None) -> dict[str, Any] | None:
     if sizing_result is None:
         return None
@@ -267,7 +235,7 @@ def _compact_order_response(response) -> dict[str, Any]:
         warning_context = f" Warnings: {'; '.join(warnings)}" if warnings else ""
         raise ValueError(f"Broker order response is missing required order or buying-power data.{warning_context}")
     result: dict[str, Any] = {
-        "order": _compact_order(order),
+        "order": compact_order(order),
         "bp_effect": compact_row(
             {key: compact_value(value) for key, value in buying_power_effect.model_dump().items()},
             drop_zero_string=True,
@@ -485,7 +453,7 @@ async def list_orders(ctx: Context) -> str:
     """List all live orders."""
     context = get_context(ctx)
     orders = await context.account.get_live_orders(context.session)
-    return tool_xml("list_orders", to_table([_compact_order(order) for order in orders]))
+    return tool_xml("list_orders", to_table([compact_order(order) for order in orders]))
 
 
 @mcp_app.tool()

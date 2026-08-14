@@ -18,7 +18,7 @@ Setup:
        export MODAL_HOST=<workspace>--tasty-agent-mcp-server.modal.run
 
        Optional overrides:
-       export TASTY_AGENT_VERSION=4.1.2
+       export TASTY_AGENT_VERSION=<published-version>
        export TASTY_AGENT_SECRET_NAME=tasty-agent-secrets
 
     5. Deploy:
@@ -35,12 +35,12 @@ Dev (ephemeral, hot-reload):
 
 import os
 
-import modal
+import modal  # pyright: ignore[reportMissingImports]  # Optional; executed with `uvx modal`.
 
 APP_NAME = os.environ.get("MODAL_APP_NAME", "tasty-agent")
 PACKAGE_VERSION = os.environ.get("TASTY_AGENT_VERSION")
-SECRET_NAME = os.environ.get("TASTY_AGENT_SECRET_NAME", "tasty-agent-secrets")
-MODAL_HOST = os.environ.get("MODAL_HOST", "ai-clone-company--tasty-agent-mcp-server.modal.run")
+SECRET_NAME = os.environ.get("TASTY_AGENT_SECRET_NAME") or "tasty-agent-secrets"
+MODAL_HOST = os.environ["MODAL_HOST"]
 
 app = modal.App(APP_NAME)
 
@@ -58,7 +58,7 @@ else:
 )
 @modal.asgi_app(requires_proxy_auth=True)
 def mcp_server():
-    from mcp.server.fastmcp.server import TransportSecuritySettings
+    from mcp.server.transport_security import TransportSecuritySettings
 
     from tasty_agent.server import mcp_app
 

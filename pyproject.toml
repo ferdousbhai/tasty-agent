@@ -13,7 +13,7 @@ dependencies = [
     "aiocache>=0.12.2",
 ]
 authors = [{ name = "Ferdous", email = "ferdous@hey.com" }]
-keywords = ["tastytrade", "trading", "mcp", "model context protocol", "broker", "robinhood", "wallstreetbets"]
+keywords = ["tastytrade", "trading", "mcp", "model context protocol", "broker"]
 classifiers = [
     "Intended Audience :: Financial and Insurance Industry",
     "Intended Audience :: End Users/Desktop",

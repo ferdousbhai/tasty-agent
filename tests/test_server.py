@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
+from tastytrade import Account
 from tastytrade.dxfeed import Quote, Trade
 from tastytrade.instruments import Equity, Future, FutureOption, Option, OptionType, TickSize
 from tastytrade.market_sessions import ExchangeType, MarketStatus
@@ -120,19 +121,22 @@ class TestToTable:
 
 class TestSelectAccount:
     def test_requires_account_id_when_credentials_expose_multiple_accounts(self):
-        accounts = [Mock(account_number="one"), Mock(account_number="two")]
+        accounts = [
+            Account.model_construct(account_number="one"),
+            Account.model_construct(account_number="two"),
+        ]
 
         with pytest.raises(ValueError, match="TASTYTRADE_ACCOUNT_ID is required"):
             select_account(accounts, None)
 
     def test_selects_only_account_without_configuration(self):
-        account = Mock(account_number="one")
+        account = Account.model_construct(account_number="one")
 
         assert select_account([account], None) is account
 
     def test_rejects_unknown_configured_account(self):
         with pytest.raises(ValueError, match="not found"):
-            select_account([Mock(account_number="one")], "missing")
+            select_account([Account.model_construct(account_number="one")], "missing")
 
 
 class TestCompactToolOutputs:
@@ -342,7 +346,6 @@ class TestCompactToolOutputs:
         with pytest.raises(ValueError, match="instrument_type"):
             _compact_watchlist(watchlist, include_symbols=True)
 
-    @pytest.mark.asyncio
     async def test_add_watchlist_propagates_lookup_failure(self):
         ctx = Mock()
         ctx.request_context.lifespan_context = SimpleNamespace(session=Mock())
@@ -466,7 +469,6 @@ class TestGetNextOpenTime:
         result = _get_next_open_time(mock_session, datetime.now(UTC))
         assert result is None
 
-    @pytest.mark.asyncio
     async def test_market_status_lookup_failure_is_not_hidden(self):
         with (
             patch("tasty_agent.market_data.get_market_sessions", new=AsyncMock(side_effect=RuntimeError("offline"))),
@@ -478,7 +480,6 @@ class TestGetNextOpenTime:
 class TestMarketStatusTool:
     """Tests for the market_status MCP tool."""
 
-    @pytest.mark.asyncio
     async def test_market_status_returns_structured_exchange_status(self):
         mock_ctx = Mock()
         mock_ctx.request_context = Mock()
@@ -511,7 +512,6 @@ class TestMarketStatusTool:
 class TestGreeksTool:
     """Tests for Greeks tool orchestration."""
 
-    @pytest.mark.asyncio
     async def test_get_greeks_streams_resolved_future_option_symbol(self):
         session = Mock()
         mock_ctx = Mock()
@@ -540,9 +540,11 @@ class TestGreeksTool:
 
         resolver.assert_awaited_once_with(session, [option])
         stream.assert_awaited_once()
-        assert stream.await_args.args[0] is session
-        assert stream.await_args.args[2] == ["./ESM6 C5800"]
-        assert stream.await_args.args[3] == 3.0
+        stream_call = stream.await_args
+        assert stream_call is not None
+        assert stream_call.args[0] is session
+        assert stream_call.args[2] == ["./ESM6 C5800"]
+        assert stream_call.args[3] == 3.0
         assert "./ESM6 C5800" in result
         assert "<greeks>" in result
 
@@ -550,7 +552,6 @@ class TestGreeksTool:
 class TestOrderTools:
     """Tests for order tool orchestration."""
 
-    @pytest.mark.asyncio
     async def test_place_order_does_not_accept_manual_price(self):
         mock_ctx = Mock()
         leg = OrderLeg(symbol="AAPL", action=OrderAction.BUY_TO_OPEN)
@@ -558,7 +559,6 @@ class TestOrderTools:
         with pytest.raises(TypeError, match="unexpected keyword argument 'price'"):
             await place_order(mock_ctx, legs=[leg], price=-1.10)  # type: ignore[call-arg]
 
-    @pytest.mark.asyncio
     async def test_place_order_target_value_uses_asset_option_tick_sizes_for_msft_call(self):
         account = Mock()
         mock_ctx = Mock()
@@ -633,7 +633,6 @@ class TestOrderTools:
             "Resolved limit price -$63.35 from mid (natural=-$65.00, mid=-$63.32, passive=-$61.65, spread=$3.35, tick=$0.05)."
         )
 
-    @pytest.mark.asyncio
     async def test_replace_uses_guarded_resolved_price(self):
         account = Mock()
         mock_ctx = Mock()
@@ -670,8 +669,12 @@ class TestBuildOrderLegs:
     """Tests for build_order_legs function."""
 
     def test_mismatched_lengths_raises_error(self):
-        details = [Mock(), Mock()]
-        legs = [Mock()]
+        instrument = Equity.model_construct(symbol="AAPL", is_index=False)
+        details = [
+            InstrumentDetail("AAPL", instrument),
+            InstrumentDetail("MSFT", instrument),
+        ]
+        legs = [OrderLeg(symbol="AAPL", action=OrderAction.BUY_TO_OPEN)]
 
         with pytest.raises(ValueError, match="Mismatched legs"):
             build_order_legs(details, legs)
@@ -834,7 +837,9 @@ class TestOrderPricing:
     def test_equity_tick_sizes_use_tastytrade_asset_model(self):
         leg = OrderLeg(symbol="PENNY", action=OrderAction.BUY_TO_OPEN, quantity=100)
         detail = self.equity_detail("PENNY")
-        detail.instrument.tick_sizes = [
+        equity = detail.instrument
+        assert isinstance(equity, Equity)
+        equity.tick_sizes = [
             TickSize(value=Decimal("0.0001"), threshold=None),
             TickSize(value=Decimal("0.01"), threshold=Decimal("1.00")),
         ]
@@ -849,7 +854,9 @@ class TestOrderPricing:
     def test_equity_tick_sizes_apply_thresholds_from_asset_model(self):
         leg = OrderLeg(symbol="AAPL", action=OrderAction.BUY_TO_OPEN, quantity=100)
         detail = self.equity_detail("AAPL")
-        detail.instrument.tick_sizes = [
+        equity = detail.instrument
+        assert isinstance(equity, Equity)
+        equity.tick_sizes = [
             TickSize(value=Decimal("0.0001"), threshold=None),
             TickSize(value=Decimal("0.01"), threshold=Decimal("1.00")),
         ]
@@ -870,7 +877,7 @@ class TestOrderPricing:
             expiration_date="2026-12-18",
         )
         detail = self.option_detail(".AAPL261218C150")
-        detail.tick_sizes = [SimpleNamespace(value=Decimal("0.05"), threshold=None)]
+        detail.tick_sizes = [TickSize(value=Decimal("0.05"), threshold=None)]
 
         market = build_order_market([detail], [leg], [self.quote("1.00", "1.20")])
 
@@ -908,7 +915,7 @@ class TestOrderPricing:
             expiration_date="2026-12-18",
         )
         detail = self.option_detail(".AAPL261218C150")
-        detail.tick_sizes = [SimpleNamespace(value=Decimal("0.05"), threshold=None)]
+        detail.tick_sizes = [TickSize(value=Decimal("0.05"), threshold=None)]
         market = build_order_market([detail], [leg], [self.quote("1.11", "1.13")])
 
         price, warnings = resolve_order_price(market, PricingPolicy())
@@ -1022,7 +1029,7 @@ class TestPydanticModels:
         with pytest.raises(ValueError, match="cannot be combined"):
             InstrumentSpec(
                 symbol="AAPL",
-                instrument_type=InstrumentType.EQUITY,
+                instrument_type="Equity",
                 option_type="C",
                 strike_price=150,
                 expiration_date="2026-12-18",
@@ -1111,7 +1118,6 @@ class TestPydanticModels:
 class TestOptionInstrumentDetails:
     """Tests for resolving option details used by market-data tools."""
 
-    @pytest.mark.asyncio
     async def test_resolves_future_option_streamer_symbol(self):
         session = Mock()
         future_option = FutureOption.model_construct(
@@ -1144,7 +1150,6 @@ class TestOptionInstrumentDetails:
         assert details[0].instrument == future_option
         mock_chain.assert_awaited_once_with(session, "/MES")
 
-    @pytest.mark.asyncio
     async def test_future_option_missing_strike_lists_available_strikes(self):
         session = Mock()
         future_option = FutureOption.model_construct(
@@ -1214,7 +1219,6 @@ class TestExchangesForSymbols:
 class TestStreamEvents:
     """Tests for _stream_events timeout handling (issue #12)."""
 
-    @pytest.mark.asyncio
     async def test_timeout_raises_valueerror_not_exceptiongroup(self):
         """Verify timeout produces a clean ValueError, not an ExceptionGroup."""
         mock_session = Mock()
@@ -1238,7 +1242,6 @@ class TestStreamEvents:
 
             await _stream_events(mock_session, Quote, ["AAPL"], timeout=0.1)
 
-    @pytest.mark.asyncio
     async def test_returns_events_in_order(self):
         """Verify events are returned in the same order as input symbols."""
         mock_session = Mock()
@@ -1270,7 +1273,6 @@ class TestStreamEvents:
 
         assert result == [event_a, event_b]
 
-    @pytest.mark.asyncio
     async def test_exceptiongroup_from_streamer_cleanup_produces_valueerror(self):
         """Verify ExceptionGroup from DXLinkStreamer cleanup is caught and converted."""
         mock_session = Mock()
@@ -1296,7 +1298,6 @@ class TestStreamEvents:
 
             await _stream_events(mock_session, Quote, ["SPX"], timeout=5.0)
 
-    @pytest.mark.asyncio
     async def test_timeout_shows_market_closed_message(self):
         """Verify market-closed message is shown instead of generic timeout."""
         mock_session = Mock()
@@ -1322,7 +1323,6 @@ class TestStreamEvents:
 
             await _stream_events(mock_session, Quote, ["AAPL"], timeout=0.1)
 
-    @pytest.mark.asyncio
     async def test_exceptiongroup_shows_market_closed_message(self):
         """Verify market-closed message is shown for ExceptionGroup when market is closed."""
         mock_session = Mock()
@@ -1356,7 +1356,6 @@ class TestStreamEvents:
 class TestStreamQuotesWithTradeFallback:
     """Tests for _stream_quotes_with_trade_fallback (VIX Trade fallback, issue #10)."""
 
-    @pytest.mark.asyncio
     async def test_vix_gets_trade_when_no_quote(self):
         """VIX should get a Trade event when no Quote event is published."""
         mock_session = Mock()
@@ -1387,7 +1386,6 @@ class TestStreamQuotesWithTradeFallback:
 
         assert result == [quote_event, trade_event]
 
-    @pytest.mark.asyncio
     async def test_quote_preferred_over_trade(self):
         """If both Quote and Trade arrive for an index, Quote should win."""
         from tastytrade.dxfeed import Trade
@@ -1424,7 +1422,6 @@ class TestStreamQuotesWithTradeFallback:
 
         assert result == [quote_spx]
 
-    @pytest.mark.asyncio
     async def test_mixed_symbols_aapl_es_vix(self):
         """Mixed query: AAPL (equity Quote), /ESM26 (futures Quote), VIX (Trade fallback)."""
         mock_session = Mock()
@@ -1466,13 +1463,18 @@ class TestStreamQuotesWithTradeFallback:
 
         assert result == [quote_aapl, quote_es, trade_vix]
 
-    @pytest.mark.asyncio
     async def test_timeout_raises_valueerror(self):
         """Timeout with missing symbols should raise ValueError."""
         mock_session = Mock()
+        cancelled_tasks = 0
 
         async def block_forever(_):
-            await asyncio.sleep(999)
+            nonlocal cancelled_tasks
+            try:
+                await asyncio.sleep(999)
+            except asyncio.CancelledError:
+                cancelled_tasks += 1
+                raise
 
         mock_streamer = AsyncMock()
         mock_streamer.__aenter__ = AsyncMock(return_value=mock_streamer)
@@ -1486,6 +1488,8 @@ class TestStreamQuotesWithTradeFallback:
             pytest.raises(ValueError, match="Timeout getting quotes after"),
         ):
             await _stream_quotes_with_trade_fallback(mock_session, ["VIX"], {"VIX"}, timeout=0.1)
+
+        assert cancelled_tasks == 2
 
 
 class TestQuoteNaNPatch:

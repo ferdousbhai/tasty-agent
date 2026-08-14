@@ -20,15 +20,16 @@ from tastytrade.utils import TastytradeError
 
 from tasty_agent.server import OrderLeg, build_order_legs, get_instrument_details
 
-pytestmark = pytest.mark.integration
-
 _client_secret = os.getenv("TASTYTRADE_CLIENT_SECRET")
 _refresh_token = os.getenv("TASTYTRADE_REFRESH_TOKEN")
 
-skip_no_creds = pytest.mark.skipif(
-    not _client_secret or not _refresh_token,
-    reason="TASTYTRADE_CLIENT_SECRET and TASTYTRADE_REFRESH_TOKEN required",
-)
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.skipif(
+        not _client_secret or not _refresh_token,
+        reason="TASTYTRADE_CLIENT_SECRET and TASTYTRADE_REFRESH_TOKEN required",
+    ),
+]
 
 
 @pytest.fixture
@@ -45,14 +46,12 @@ async def account(session):
     return accounts[0]
 
 
-@skip_no_creds
 async def test_session_valid(session):
     """Session should be active after creation."""
     assert session.session_token is not None
     assert session.session_expiration is not None
 
 
-@skip_no_creds
 async def test_get_accounts(session):
     """Should fetch at least one account."""
     accounts = await Account.get(session)
@@ -60,7 +59,6 @@ async def test_get_accounts(session):
     assert accounts[0].account_number is not None
 
 
-@skip_no_creds
 async def test_get_balances(session, account):
     """Should fetch account balances without error."""
     balances = await account.get_balances(session)
@@ -69,14 +67,12 @@ async def test_get_balances(session, account):
     assert "net_liquidating_value" in data
 
 
-@skip_no_creds
 async def test_get_positions(session, account):
     """Should fetch positions (may be empty, but shouldn't error)."""
     positions = await account.get_positions(session)
     assert isinstance(positions, list)
 
 
-@skip_no_creds
 async def test_symbol_search(session):
     """Should find results for AAPL."""
     results = await symbol_search(session, "AAPL")
@@ -85,7 +81,6 @@ async def test_symbol_search(session):
     assert "AAPL" in symbols
 
 
-@skip_no_creds
 async def test_get_market_metrics(session):
     """Should return metrics for AAPL."""
     metrics = await get_market_metrics(session, ["AAPL"])
@@ -93,16 +88,13 @@ async def test_get_market_metrics(session):
     assert metrics[0].symbol == "AAPL"
 
 
-@skip_no_creds
 async def test_get_option_chain(session):
     """Should return option chain with expiration dates and options."""
     chain = await get_option_chain(session, "AAPL")
     assert chain
-    first_expiration = next(iter(chain))
-    assert chain[first_expiration]
+    assert next(iter(chain.values()))
 
 
-@skip_no_creds
 async def test_get_market_sessions(session):
     """Should return market session info for NYSE (Equity)."""
     sessions = await get_market_sessions(session, [ExchangeType.NYSE])
@@ -110,7 +102,6 @@ async def test_get_market_sessions(session):
     assert sessions[0].status is not None
 
 
-@skip_no_creds
 async def test_get_market_holidays(session):
     """Should return market calendar."""
     calendar = await get_market_holidays(session)
@@ -119,7 +110,6 @@ async def test_get_market_holidays(session):
     assert hasattr(calendar, "half_days")
 
 
-@skip_no_creds
 async def test_dry_run_equity_order(session, account):
     """Dry-run order should reach the API (validation errors still prove connectivity)."""
     equity = await Equity.get(session, "AAPL")
@@ -138,7 +128,6 @@ async def test_dry_run_equity_order(session, account):
         assert "margin" in str(e).lower() or "price" in str(e).lower() or "buy" in str(e).lower()
 
 
-@skip_no_creds
 async def test_dry_run_equity_buy_to_open_order_leg_mapping(session, account):
     """Equity buys should use BUY_TO_OPEN and pass dry-run validation."""
     leg_spec = OrderLeg(symbol="AAPL", action=OrderAction.BUY_TO_OPEN, quantity=1)

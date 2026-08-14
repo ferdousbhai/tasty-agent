@@ -50,13 +50,14 @@ async def main():
         if not tool_name:
             tools = await session.list_tools()
             print(f"{len(tools.tools)} tools available:\n")
-            for t in tools.tools:
-                print(f"  {t.name}: {t.description[:80]}")
+            for tool in tools.tools:
+                description = tool.description or ""
+                print(f"  {tool.name}: {description[:80]}")
             return
 
         result = await session.call_tool(tool_name, tool_args)
         for item in result.content:
-            print(item.text if hasattr(item, "text") else item)
+            print(getattr(item, "text", item))
 
 
 if __name__ == "__main__":

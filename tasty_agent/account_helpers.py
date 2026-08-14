@@ -116,7 +116,7 @@ def _compact_transaction(transaction) -> dict[str, Any]:
     return compact_row(row, drop_zero_string=True)
 
 
-def _compact_order(order) -> dict[str, Any]:
+def compact_order(order) -> dict[str, Any]:
     data = order.model_dump()
     row = {
         "id": compact_value(data.get("id")),
@@ -214,4 +214,4 @@ async def fetch_history(
         raise ValueError(f"Broker returned no {type} collection")
     if type == "transactions":
         return to_table([_compact_transaction(item) for item in items])
-    return to_table([_compact_order(item) for item in items])
+    return to_table([compact_order(item) for item in items])
