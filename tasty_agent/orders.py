@@ -43,8 +43,6 @@ CENT = Decimal("0.01")
 
 @dataclass
 class InstrumentDetail:
-    """Details for a resolved instrument."""
-
     streamer_symbol: str
     instrument: Equity | Option | Future | FutureOption
     is_index: bool = False
@@ -122,7 +120,6 @@ class OrderLeg(BaseModel):
 
     @model_validator(mode="after")
     def validate_action_for_instrument(self) -> OrderLeg:
-        """Restrict actions to the values accepted for the inferred instrument type."""
         instrument_type = resolve_instrument_type(self.to_instrument_spec())
 
         if instrument_type == InstrumentType.FUTURE and self.action not in DIRECTIONAL_ACTIONS:
@@ -193,17 +190,8 @@ class OrderSizingResult:
     estimated_value: Decimal
 
 
-def default_pricing_policy() -> PricingPolicy:
-    return PricingPolicy(
-        mid_distance_warning_cents=5,
-        mid_distance_warning_spread_fraction=0.25,
-    )
-
-
 @dataclass(frozen=True)
 class LegQuote:
-    """Bid/ask quote resolved for one order leg."""
-
     symbol: str
     action: OrderAction
     quantity: Decimal
@@ -217,8 +205,9 @@ class LegQuote:
 class OrderMarket:
     """Signed net market for an order.
 
-    Prices are per order unit: 100 shares, 17 single-leg option contracts, or
-    17 vertical spreads are quoted as one per-share/per-contract/per-spread price.
+    Prices describe one reduced leg-ratio unit regardless of submitted quantity:
+    100 shares or 17 contracts retain the instrument's per-share/per-contract price,
+    while a 17:17 vertical is priced as one 1:1 spread.
     natural_price is the marketable side: buy legs at ask and sell legs at bid.
     passive_price is the optimistic side: buy legs at bid and sell legs at ask.
     The server uses Tastytrade's signed net price convention: debits are negative
@@ -234,7 +223,6 @@ class OrderMarket:
 
 
 def validate_date_format(date_string: str) -> date:
-    """Validate date format and return date object."""
     try:
         return datetime.strptime(date_string, "%Y-%m-%d").date()
     except ValueError as e:
@@ -242,7 +230,6 @@ def validate_date_format(date_string: str) -> date:
 
 
 def validate_strike_price(strike_price: Any) -> float:
-    """Validate and convert strike price to float."""
     try:
         strike = float(strike_price)
     except (ValueError, TypeError) as e:
@@ -255,7 +242,6 @@ def validate_strike_price(strike_price: Any) -> float:
 
 
 def format_signed_money(value: Decimal) -> str:
-    """Format a signed net order price with debit/credit sign preserved."""
     amount = abs(value).quantize(CENT)
     prefix = "-" if value < 0 else ""
     return f"{prefix}${amount:.2f}"
@@ -301,7 +287,6 @@ def _has_tick_price_inside(market: OrderMarket) -> bool:
 
 
 def _asset_tick_size(tick_sizes: list[TickSize] | None, price: Decimal) -> Decimal | None:
-    """Resolve the valid tick from tastytrade asset tick-size data."""
     if tick_sizes is None:
         return None
     if not isinstance(tick_sizes, list | tuple) or not tick_sizes:
@@ -351,13 +336,13 @@ def order_price_tick_size(
     instrument_details: list[InstrumentDetail],
     leg_quotes: list[LegQuote] | tuple[LegQuote, ...],
 ) -> Decimal:
-    ticks = [
+    leg_tick_sizes = [
         _instrument_tick_size(detail, leg_quote.mid)
         for detail, leg_quote in zip(instrument_details, leg_quotes, strict=True)
     ]
-    if not ticks:
+    if not leg_tick_sizes:
         raise ValueError("Cannot resolve an order tick size without order legs")
-    return max(ticks)
+    return max(leg_tick_sizes)
 
 
 def _whole_number_quantity(leg: Any) -> int:
@@ -382,16 +367,11 @@ def _quantity_gcd(legs: list[Any]) -> int:
     return unit_size
 
 
-def _price_unit_size(legs: list[Any]) -> Decimal:
-    return Decimal(_quantity_gcd(legs))
-
-
 def build_order_market(
     instrument_details: list[InstrumentDetail],
     legs: list[Any],
     quotes: list[Any],
 ) -> OrderMarket:
-    """Build a signed net bid/ask market from quotes for the exact order instruments."""
     if len(instrument_details) != len(legs) or len(legs) != len(quotes):
         raise ValueError(
             f"Mismatched order inputs: {len(instrument_details)} instruments, {len(legs)} legs, {len(quotes)} quotes"
@@ -402,7 +382,7 @@ def build_order_market(
     natural_price = Decimal("0")
     passive_price = Decimal("0")
     leg_quotes: list[LegQuote] = []
-    unit_size = _price_unit_size(legs)
+    unit_size = Decimal(_quantity_gcd(legs))
 
     for detail, leg, quote in zip(instrument_details, legs, quotes, strict=True):
         bid = _to_decimal_price(getattr(quote, "bid_price", None), f"bid price for {describe_instrument(detail)}")
@@ -512,7 +492,6 @@ def resolve_order_price(
     market: OrderMarket,
     pricing: PricingPolicy,
 ) -> tuple[Decimal, list[str]]:
-    """Resolve and validate the final signed limit price for an order."""
     candidate = _mid_price(market)
     warnings = _validate_limit_price(market, candidate, pricing)
     return candidate, warnings
@@ -540,7 +519,6 @@ def apply_order_sizing(
     price: Decimal,
     sizing: OrderSizingPolicy | None,
 ) -> tuple[list[OrderLeg], OrderSizingResult | None]:
-    """Scale leg-ratio quantities from a quote-derived per-unit price and dollar budget."""
     if sizing is None:
         return legs, None
     if not legs or len(instrument_details) != len(legs):
@@ -575,30 +553,39 @@ def apply_order_sizing(
     return sized_legs, result
 
 
-def _option_chain_key_builder(fn, session: Session, symbol: str):
-    """Build cache key using only symbol (session changes but symbol is stable)."""
+def _option_chain_key_builder(_fn, _session: Session, symbol: str):
     return f"option_chain:{symbol}"
 
 
-def _future_option_chain_key_builder(fn, session: Session, symbol: str):
-    """Build cache key using only symbol (session changes but symbol is stable)."""
+def _future_option_chain_key_builder(_fn, _session: Session, symbol: str):
     return f"future_option_chain:{symbol}"
 
 
-@cached(ttl=86400, cache=Cache.MEMORY, serializer=PickleSerializer(), key_builder=_option_chain_key_builder)
+# Contract metadata changes infrequently; a day-long cache avoids repeated broker lookups.
+OPTION_CHAIN_CACHE_TTL_SECONDS = 24 * 60 * 60
+
+
+@cached(
+    ttl=OPTION_CHAIN_CACHE_TTL_SECONDS,
+    cache=Cache.MEMORY,
+    serializer=PickleSerializer(),
+    key_builder=_option_chain_key_builder,
+)
 async def get_cached_option_chain(session: Session, symbol: str):
-    """Cache option chains for 24 hours as they rarely change during that timeframe."""
     return await get_option_chain(session, symbol)
 
 
-@cached(ttl=86400, cache=Cache.MEMORY, serializer=PickleSerializer(), key_builder=_future_option_chain_key_builder)
+@cached(
+    ttl=OPTION_CHAIN_CACHE_TTL_SECONDS,
+    cache=Cache.MEMORY,
+    serializer=PickleSerializer(),
+    key_builder=_future_option_chain_key_builder,
+)
 async def get_cached_future_option_chain(session: Session, symbol: str):
-    """Cache futures option chains for 24 hours as they rarely change during that timeframe."""
     return await get_future_option_chain(session, symbol)
 
 
 def resolve_instrument_type(spec: InstrumentSpec) -> InstrumentType:
-    """Determine instrument type from spec fields."""
     if spec.instrument_type:
         return InstrumentType(spec.instrument_type)
     if spec.option_type:
@@ -609,7 +596,6 @@ def resolve_instrument_type(spec: InstrumentSpec) -> InstrumentType:
 
 
 async def _lookup_option_detail(session: Session, spec: InstrumentSpec, symbol: str) -> InstrumentDetail:
-    """Resolve an equity option contract from the cached option chain."""
     if not spec.option_type:
         raise ValueError(f"option_type ('C' or 'P') is required for option {symbol}")
     option_type = spec.option_type
@@ -649,7 +635,6 @@ async def _lookup_option_detail(session: Session, spec: InstrumentSpec, symbol: 
 
 
 async def _lookup_future_option_detail(session: Session, spec: InstrumentSpec, symbol: str) -> InstrumentDetail:
-    """Resolve a futures option contract from the cached futures option chain."""
     if not spec.option_type:
         raise ValueError(f"option_type ('C' or 'P') is required for option {symbol}")
     option_type = spec.option_type
@@ -686,7 +671,6 @@ async def _lookup_future_option_detail(session: Session, spec: InstrumentSpec, s
 
 
 async def _lookup_future_detail(session: Session, symbol: str) -> InstrumentDetail:
-    """Resolve a future contract."""
     instrument = await Future.get(session, symbol)
     if not instrument.streamer_symbol:
         raise ValueError(f"Future contract is missing streamer symbol: {symbol}")
@@ -694,7 +678,6 @@ async def _lookup_future_detail(session: Session, symbol: str) -> InstrumentDeta
 
 
 async def _lookup_equity_detail(session: Session, symbol: str, is_index: bool = False) -> InstrumentDetail:
-    """Resolve an equity or index instrument."""
     instrument = await Equity.get(session, symbol)
     if is_index and not instrument.streamer_symbol:
         raise ValueError(f"Index is missing streamer symbol: {symbol}")
@@ -703,7 +686,6 @@ async def _lookup_equity_detail(session: Session, symbol: str, is_index: bool = 
 
 
 async def _lookup_order_leg_detail(session: Session, leg: Any) -> InstrumentDetail:
-    """Resolve an existing broker order leg to its streamable instrument."""
     symbol = getattr(leg, "symbol", None)
     instrument_type = getattr(leg, "instrument_type", None)
     if not symbol or not instrument_type:
@@ -740,13 +722,10 @@ async def _lookup_order_leg_detail(session: Session, leg: Any) -> InstrumentDeta
 
 
 async def get_order_leg_instrument_details(session: Session, legs: list[Any]) -> list[InstrumentDetail]:
-    """Resolve existing broker order legs for quote-based replacement pricing."""
     return await asyncio.gather(*[_lookup_order_leg_detail(session, leg) for leg in legs])
 
 
 async def get_instrument_details(session: Session, instrument_specs: list[InstrumentSpec]) -> list[InstrumentDetail]:
-    """Get instrument details with validation and caching."""
-
     async def lookup_single_instrument(spec: InstrumentSpec) -> InstrumentDetail:
         symbol = spec.symbol.upper()
         resolved_type = resolve_instrument_type(spec)
@@ -772,12 +751,10 @@ async def get_instrument_details(session: Session, instrument_specs: list[Instru
 
 
 async def get_option_instrument_details(session: Session, option_specs: list[OptionSpec]) -> list[InstrumentDetail]:
-    """Get streamable option details for equity and futures option contracts."""
     return await get_instrument_details(session, [spec.to_instrument_spec() for spec in option_specs])
 
 
 def build_order_legs(instrument_details: list[InstrumentDetail], legs: list[OrderLeg]) -> list:
-    """Build order legs from instrument details and leg specifications."""
     if len(instrument_details) != len(legs):
         raise ValueError(f"Mismatched legs: {len(instrument_details)} instruments vs {len(legs)} leg specs")
     if not legs:
@@ -793,7 +770,6 @@ def build_order_legs(instrument_details: list[InstrumentDetail], legs: list[Orde
 
 
 def describe_instrument(detail: InstrumentDetail) -> str:
-    """Build a concise instrument label for errors and logs."""
     instrument = detail.instrument
     if isinstance(instrument, Option | FutureOption):
         return (
@@ -808,7 +784,6 @@ def build_new_order(
     legs: list,
     price: Decimal | float,
 ) -> NewOrder:
-    """Build a limit order from resolved legs and price."""
     return NewOrder(
         time_in_force=time_in_force,
         order_type=OrderType.LIMIT,
@@ -818,7 +793,6 @@ def build_new_order(
 
 
 async def find_live_order(account, session: Session, order_id: str):
-    """Return a live order by id, raising a helpful error if missing."""
     live_orders = await account.get_live_orders(session)
     existing_order = next((order for order in live_orders if str(order.id) == order_id), None)
 

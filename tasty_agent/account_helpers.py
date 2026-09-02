@@ -138,7 +138,6 @@ async def build_account_overview(
     ctx: Context,
     include: list[Literal["balances", "positions"]] | None = None,
 ) -> dict[str, Any]:
-    """Fetch account balances and/or positions and format the response."""
     if include is None:
         include = ["balances", "positions"]
     if not include:
@@ -176,7 +175,6 @@ async def fetch_history(
     page_offset: int = 0,
     limit: int = 25,
 ) -> str:
-    """Fetch transaction or order history and return it as a table."""
     if type not in {"transactions", "orders"}:
         raise ValueError("type must be 'transactions' or 'orders'")
     if days is not None and days < 0:

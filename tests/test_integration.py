@@ -23,6 +23,9 @@ from tasty_agent.server import OrderLeg, build_order_legs, get_instrument_detail
 _client_secret = os.getenv("TASTYTRADE_CLIENT_SECRET")
 _refresh_token = os.getenv("TASTYTRADE_REFRESH_TOKEN")
 
+# Tastytrade represents debit prices as negative values.
+NON_FILLING_DEBIT_PRICE = Decimal("-1.00")
+
 pytestmark = [
     pytest.mark.integration,
     pytest.mark.skipif(
@@ -40,27 +43,23 @@ def session():
 
 @pytest.fixture
 async def account(session):
-    """Get the first available account."""
     accounts = await Account.get(session)
     assert accounts, "No accounts found"
     return accounts[0]
 
 
 async def test_session_valid(session):
-    """Session should be active after creation."""
     assert session.session_token is not None
     assert session.session_expiration is not None
 
 
 async def test_get_accounts(session):
-    """Should fetch at least one account."""
     accounts = await Account.get(session)
     assert accounts
     assert accounts[0].account_number is not None
 
 
 async def test_get_balances(session, account):
-    """Should fetch account balances without error."""
     balances = await account.get_balances(session)
     assert balances is not None
     data = balances.model_dump()
@@ -68,13 +67,11 @@ async def test_get_balances(session, account):
 
 
 async def test_get_positions(session, account):
-    """Should fetch positions (may be empty, but shouldn't error)."""
     positions = await account.get_positions(session)
     assert isinstance(positions, list)
 
 
 async def test_symbol_search(session):
-    """Should find results for AAPL."""
     results = await symbol_search(session, "AAPL")
     assert results
     symbols = [r.symbol for r in results]
@@ -82,28 +79,24 @@ async def test_symbol_search(session):
 
 
 async def test_get_market_metrics(session):
-    """Should return metrics for AAPL."""
     metrics = await get_market_metrics(session, ["AAPL"])
     assert metrics
     assert metrics[0].symbol == "AAPL"
 
 
 async def test_get_option_chain(session):
-    """Should return option chain with expiration dates and options."""
     chain = await get_option_chain(session, "AAPL")
     assert chain
     assert next(iter(chain.values()))
 
 
 async def test_get_market_sessions(session):
-    """Should return market session info for NYSE (Equity)."""
     sessions = await get_market_sessions(session, [ExchangeType.NYSE])
     assert sessions
     assert sessions[0].status is not None
 
 
 async def test_get_market_holidays(session):
-    """Should return market calendar."""
     calendar = await get_market_holidays(session)
     assert calendar is not None
     assert hasattr(calendar, "holidays")
@@ -111,25 +104,23 @@ async def test_get_market_holidays(session):
 
 
 async def test_dry_run_equity_order(session, account):
-    """Dry-run order should reach the API (validation errors still prove connectivity)."""
     equity = await Equity.get(session, "AAPL")
     leg = equity.build_leg(Decimal("1"), OrderAction.BUY)
     order = NewOrder(
         time_in_force=OrderTimeInForce.DAY,
         order_type=OrderType.LIMIT,
         legs=[leg],
-        price=Decimal("-1.00"),  # Negative = debit (buying); intentionally low so it won't fill
+        price=NON_FILLING_DEBIT_PRICE,
     )
     try:
         response = await account.place_order(session, order, dry_run=True)
         assert response is not None
     except TastytradeError as e:
-        # Validation errors (margin, price) are expected — they prove the API call works
+        # Margin and price validation errors still prove the API call reached the broker.
         assert "margin" in str(e).lower() or "price" in str(e).lower() or "buy" in str(e).lower()
 
 
 async def test_dry_run_equity_buy_to_open_order_leg_mapping(session, account):
-    """Equity buys should use BUY_TO_OPEN and pass dry-run validation."""
     leg_spec = OrderLeg(symbol="AAPL", action=OrderAction.BUY_TO_OPEN, quantity=1)
     instrument_details = await get_instrument_details(session, [leg_spec.to_instrument_spec()])
     built_legs = build_order_legs(instrument_details, [leg_spec])
@@ -138,7 +129,7 @@ async def test_dry_run_equity_buy_to_open_order_leg_mapping(session, account):
         time_in_force=OrderTimeInForce.DAY,
         order_type=OrderType.LIMIT,
         legs=built_legs,
-        price=Decimal("-1.00"),
+        price=NON_FILLING_DEBIT_PRICE,
     )
     try:
         response = await account.place_order(session, order, dry_run=True)

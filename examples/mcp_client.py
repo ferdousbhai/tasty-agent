@@ -1,10 +1,10 @@
 """Connect to a remote tasty-agent MCP server and call tools.
 
 Usage:
-    # List tools
+    List tools:
     uv run examples/mcp_client.py
 
-    # Call a specific tool
+    Call a specific tool:
     uv run examples/mcp_client.py market_status
     uv run examples/mcp_client.py get_market_metrics '{"symbols": ["AAPL", "SPY"]}'
     uv run examples/mcp_client.py account_overview '{"include": ["balances", "positions"]}'

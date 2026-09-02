@@ -1,5 +1,3 @@
-"""Unit tests for tasty_agent.server module."""
-
 import asyncio
 import json
 import re
@@ -100,8 +98,6 @@ def broker_order_response(leg: Leg):
 
 
 class TestToTable:
-    """Tests for to_table function."""
-
     def test_empty_data_returns_no_data(self):
         assert to_table([]) == "No data"
 
@@ -140,8 +136,6 @@ class TestSelectAccount:
 
 
 class TestCompactToolOutputs:
-    """Tests for token-efficient tool output rows."""
-
     def test_tool_xml_wraps_json_concisely(self):
         result = tool_xml("get_quotes", {"status": "Open", "note": "A&B"})
 
@@ -363,8 +357,6 @@ class TestCompactToolOutputs:
 
 
 class TestValidateDateFormat:
-    """Tests for validate_date_format function."""
-
     def test_valid_date(self):
         result = validate_date_format("2024-12-20")
         assert result == date(2024, 12, 20)
@@ -379,8 +371,6 @@ class TestValidateDateFormat:
 
 
 class TestValidateStrikePrice:
-    """Tests for validate_strike_price function."""
-
     def test_valid_float(self):
         assert validate_strike_price(150.0) == 150.0
 
@@ -413,8 +403,6 @@ class TestValidateStrikePrice:
 
 
 class TestOptionChainKeyBuilder:
-    """Tests for cache key builder."""
-
     def test_key_uses_symbol_only(self):
         mock_fn = Mock()
         mock_session = Mock()
@@ -431,8 +419,6 @@ class TestOptionChainKeyBuilder:
 
 
 class TestGetNextOpenTime:
-    """Tests for _get_next_open_time function."""
-
     def test_pre_market_returns_open_at(self):
         mock_session = Mock()
         mock_session.status = MarketStatus.PRE_MARKET
@@ -478,8 +464,6 @@ class TestGetNextOpenTime:
 
 
 class TestMarketStatusTool:
-    """Tests for the market_status MCP tool."""
-
     async def test_market_status_returns_structured_exchange_status(self):
         mock_ctx = Mock()
         mock_ctx.request_context = Mock()
@@ -510,8 +494,6 @@ class TestMarketStatusTool:
 
 
 class TestGreeksTool:
-    """Tests for Greeks tool orchestration."""
-
     async def test_get_greeks_streams_resolved_future_option_symbol(self):
         session = Mock()
         mock_ctx = Mock()
@@ -550,8 +532,6 @@ class TestGreeksTool:
 
 
 class TestOrderTools:
-    """Tests for order tool orchestration."""
-
     async def test_place_order_does_not_accept_manual_price(self):
         mock_ctx = Mock()
         leg = OrderLeg(symbol="AAPL", action=OrderAction.BUY_TO_OPEN)
@@ -666,8 +646,6 @@ class TestOrderTools:
 
 
 class TestBuildOrderLegs:
-    """Tests for build_order_legs function."""
-
     def test_mismatched_lengths_raises_error(self):
         instrument = Equity.model_construct(symbol="AAPL", is_index=False)
         details = [
@@ -711,8 +689,6 @@ class TestBuildOrderLegs:
 
 
 class TestOrderPricing:
-    """Tests for quote-derived order pricing safeguards."""
-
     @staticmethod
     def quote(bid: str, ask: str):
         event = Mock()
@@ -1005,8 +981,6 @@ class TestOrderPricing:
 
 
 class TestPydanticModels:
-    """Tests for Pydantic model validation."""
-
     def test_instrument_spec_stock(self):
         spec = InstrumentSpec(symbol="AAPL")
         assert spec.symbol == "AAPL"
@@ -1116,8 +1090,6 @@ class TestPydanticModels:
 
 
 class TestOptionInstrumentDetails:
-    """Tests for resolving option details used by market-data tools."""
-
     async def test_resolves_future_option_streamer_symbol(self):
         session = Mock()
         future_option = FutureOption.model_construct(
@@ -1181,8 +1153,6 @@ class TestOptionInstrumentDetails:
 
 
 class TestInstrumentDetail:
-    """Tests for InstrumentDetail dataclass."""
-
     def test_creation(self):
         mock_instrument = Mock()
         detail = InstrumentDetail("AAPL", mock_instrument)
@@ -1191,8 +1161,6 @@ class TestInstrumentDetail:
 
 
 class TestExchangesForSymbols:
-    """Tests for _exchanges_for_symbols helper."""
-
     def test_equity_symbols(self):
         assert _exchanges_for_symbols(["AAPL", "TSLA"]) == {ExchangeType.NYSE}
 
@@ -1217,10 +1185,7 @@ class TestExchangesForSymbols:
 
 
 class TestStreamEvents:
-    """Tests for _stream_events timeout handling (issue #12)."""
-
     async def test_timeout_raises_valueerror_not_exceptiongroup(self):
-        """Verify timeout produces a clean ValueError, not an ExceptionGroup."""
         mock_session = Mock()
 
         mock_streamer = AsyncMock()
@@ -1243,7 +1208,6 @@ class TestStreamEvents:
             await _stream_events(mock_session, Quote, ["AAPL"], timeout=0.1)
 
     async def test_returns_events_in_order(self):
-        """Verify events are returned in the same order as input symbols."""
         mock_session = Mock()
 
         event_a = Mock()
@@ -1274,7 +1238,6 @@ class TestStreamEvents:
         assert result == [event_a, event_b]
 
     async def test_exceptiongroup_from_streamer_cleanup_produces_valueerror(self):
-        """Verify ExceptionGroup from DXLinkStreamer cleanup is caught and converted."""
         mock_session = Mock()
 
         async def failing_context(*args, **kwargs):
@@ -1299,7 +1262,6 @@ class TestStreamEvents:
             await _stream_events(mock_session, Quote, ["SPX"], timeout=5.0)
 
     async def test_timeout_shows_market_closed_message(self):
-        """Verify market-closed message is shown instead of generic timeout."""
         mock_session = Mock()
 
         mock_streamer = AsyncMock()
@@ -1324,7 +1286,6 @@ class TestStreamEvents:
             await _stream_events(mock_session, Quote, ["AAPL"], timeout=0.1)
 
     async def test_exceptiongroup_shows_market_closed_message(self):
-        """Verify market-closed message is shown for ExceptionGroup when market is closed."""
         mock_session = Mock()
 
         async def failing_context(*args, **kwargs):
@@ -1354,10 +1315,7 @@ class TestStreamEvents:
 
 
 class TestStreamQuotesWithTradeFallback:
-    """Tests for _stream_quotes_with_trade_fallback (VIX Trade fallback, issue #10)."""
-
     async def test_vix_gets_trade_when_no_quote(self):
-        """VIX should get a Trade event when no Quote event is published."""
         mock_session = Mock()
 
         trade_event = Mock()
@@ -1387,7 +1345,6 @@ class TestStreamQuotesWithTradeFallback:
         assert result == [quote_event, trade_event]
 
     async def test_quote_preferred_over_trade(self):
-        """If both Quote and Trade arrive for an index, Quote should win."""
         from tastytrade.dxfeed import Trade
 
         mock_session = Mock()
@@ -1423,7 +1380,6 @@ class TestStreamQuotesWithTradeFallback:
         assert result == [quote_spx]
 
     async def test_mixed_symbols_aapl_es_vix(self):
-        """Mixed query: AAPL (equity Quote), /ESM26 (futures Quote), VIX (Trade fallback)."""
         mock_session = Mock()
 
         quote_aapl = Mock()
@@ -1464,7 +1420,6 @@ class TestStreamQuotesWithTradeFallback:
         assert result == [quote_aapl, quote_es, trade_vix]
 
     async def test_timeout_raises_valueerror(self):
-        """Timeout with missing symbols should raise ValueError."""
         mock_session = Mock()
         cancelled_tasks = 0
 
@@ -1493,10 +1448,7 @@ class TestStreamQuotesWithTradeFallback:
 
 
 class TestQuoteNaNPatch:
-    """Tests for the Quote model patch that allows NaN sizes for index symbols."""
-
     def test_index_quotes_with_nan_sizes(self):
-        """Verify index symbols (SPX, VIX) with NaN bid/ask sizes are not silently dropped."""
         from decimal import Decimal
 
         from tastytrade.dxfeed import Quote
@@ -1512,7 +1464,6 @@ class TestQuoteNaNPatch:
         assert result[0].ask_size == Decimal("0")
 
     def test_equity_quotes_still_parse(self):
-        """Verify the NaN patch doesn't break normal equity quote parsing."""
         from decimal import Decimal
 
         from tastytrade.dxfeed import Quote
@@ -1525,7 +1476,6 @@ class TestQuoteNaNPatch:
         assert result[0].ask_size == Decimal("1300")
 
     def test_nan_prices_still_rejected(self):
-        """Ensure NaN prices cause the event to be dropped (only sizes are patched)."""
         from tastytrade.dxfeed import Quote
 
         raw_data = ["BAD", 0, 0, 0, 0, "\x00", 0, "\x00", "NaN", "NaN", "NaN", "NaN"]

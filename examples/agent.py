@@ -10,7 +10,6 @@ load_dotenv()
 
 
 def create_tastytrader_agent() -> Agent:
-    """Create and return a configured agent instance."""
     model_identifier = os.getenv("MODEL_IDENTIFIER", "openai:gpt-5.6-sol")
     logger.info(f"Creating agent with model: {model_identifier}")
 

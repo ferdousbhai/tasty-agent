@@ -23,17 +23,14 @@ class WatchlistSymbol(BaseModel):
 
 
 def _symbol_list(symbols: list[WatchlistSymbol]) -> str:
-    """Format symbols for status messages."""
     return ", ".join(f"{s.symbol} ({s.instrument_type})" for s in symbols)
 
 
 def _watchlist_entries(symbols: list[WatchlistSymbol]) -> list[dict[str, str]]:
-    """Convert watchlist symbols to tastytrade upload entries."""
     return [{"symbol": s.symbol, "instrument_type": s.instrument_type} for s in symbols]
 
 
 def _compact_watchlist(watchlist, *, include_symbols: bool) -> dict[str, Any]:
-    """Return watchlist metadata with compact symbol entries."""
     data = watchlist.model_dump()
     if not data.get("name"):
         raise ValueError("Watchlist is missing name")
@@ -68,7 +65,6 @@ async def manage_watchlist(
     name: str | None = None,
     symbols: list[WatchlistSymbol] | None = None,
 ) -> list[dict[str, Any]] | dict[str, Any]:
-    """Manage watchlists: list, add symbols, remove symbols, or delete."""
     if watchlist_type not in {"public", "private"}:
         raise ValueError(f"Unsupported watchlist type: {watchlist_type}")
     if name is not None and not name.strip():
@@ -86,11 +82,7 @@ async def manage_watchlist(
     if watchlist_type != "private":
         raise ValueError(f"action='{action}' is supported only for private watchlists")
 
-    if name is None:
-        logger.info("No watchlist name provided, defaulting to 'main'")
-        effective_name = "main"
-    else:
-        effective_name = name
+    effective_name = name if name is not None else "main"
 
     if action == "delete":
         await PrivateWatchlist.remove(session, effective_name)
@@ -113,7 +105,6 @@ async def _add_watchlist_symbols(
     watchlist_name: str,
     symbols: list[WatchlistSymbol],
 ) -> dict[str, Any]:
-    """Add symbols to a private watchlist, creating it if needed."""
     symbol_list = _symbol_list(symbols)
     watchlists = await PrivateWatchlist.get(session)
     watchlist = next(
@@ -145,7 +136,6 @@ async def _remove_watchlist_symbols(
     watchlist_name: str,
     symbols: list[WatchlistSymbol],
 ) -> dict[str, Any]:
-    """Remove symbols from a private watchlist."""
     watchlist = await PrivateWatchlist.get(session, watchlist_name)
     for symbol_spec in symbols:
         watchlist.remove_symbol(symbol_spec.symbol, InstrumentType(symbol_spec.instrument_type))

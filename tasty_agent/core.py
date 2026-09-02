@@ -26,7 +26,6 @@ def is_compact_empty(
     drop_zero_string: bool = False,
     drop_numeric_zero: bool = False,
 ) -> bool:
-    """Return whether a compacted value should be omitted from tool output."""
     if value in COMPACT_EMPTY_VALUES:
         return True
     if drop_zero_string and value == "0":
@@ -40,7 +39,6 @@ def compact_row(
     drop_zero_string: bool = False,
     drop_numeric_zero: bool = False,
 ) -> dict[str, Any]:
-    """Drop empty values from an already compacted row."""
     return {
         key: value
         for key, value in data.items()
@@ -53,7 +51,6 @@ def compact_row(
 
 
 def compact_value(value: Any) -> Any:
-    """Return a compact, JSON/table friendly scalar."""
     if isinstance(value, Decimal):
         if not value.is_finite():
             raise ValueError(f"Cannot compact non-finite Decimal value: {value}")
@@ -77,7 +74,6 @@ def compact_value(value: Any) -> Any:
 
 
 def compact_dict(data: dict[str, Any]) -> dict[str, Any]:
-    """Keep non-empty fields and compact scalar values."""
     compacted: dict[str, Any] = {}
     for key, raw_value in data.items():
         value = compact_value(raw_value)
@@ -88,12 +84,10 @@ def compact_dict(data: dict[str, Any]) -> dict[str, Any]:
 
 
 def compact_model_dump(model: BaseModel) -> dict[str, Any]:
-    """Dump a Pydantic model without empty fields or verbose Decimal/Enum objects."""
     return compact_dict(model.model_dump())
 
 
 def to_table(data: Sequence[BaseModel] | Sequence[dict[str, Any]]) -> str:
-    """Format rows as a compact plain table."""
     if not data:
         return "No data"
     rows = [compact_model_dump(item) if isinstance(item, BaseModel) else compact_dict(item) for item in data]
@@ -107,7 +101,6 @@ class ServerContext:
 
 
 def select_account(accounts: list[Account], account_id: str | None) -> Account:
-    """Select one unambiguous brokerage account."""
     if not accounts:
         raise ValueError("No Tastytrade accounts are available for these credentials.")
     if account_id:
@@ -128,18 +121,16 @@ def select_account(accounts: list[Account], account_id: str | None) -> Account:
 
 
 def get_context(ctx: Context) -> ServerContext:
-    """Extract ServerContext from the MCP request context."""
     return ctx.request_context.lifespan_context
 
 
 def get_session(ctx: Context) -> Session:
-    """Get the tastytrade session (auto-refreshes tokens before each API call)."""
+    """The SDK refreshes authentication tokens before each API call."""
     return get_context(ctx).session
 
 
 @asynccontextmanager
 async def lifespan(_) -> AsyncIterator[ServerContext]:
-    """Manage Tastytrade session lifecycle."""
     client_secret = os.getenv("TASTYTRADE_CLIENT_SECRET")
     refresh_token = os.getenv("TASTYTRADE_REFRESH_TOKEN")
     account_id = os.getenv("TASTYTRADE_ACCOUNT_ID")

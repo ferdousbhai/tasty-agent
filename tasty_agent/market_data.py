@@ -12,7 +12,6 @@ from tastytrade.streamer import DXLinkStreamer
 
 
 def exchanges_for_symbols(streamer_symbols: list[str]) -> set[ExchangeType]:
-    """Determine which exchanges to check based on streamer symbols."""
     exchanges: set[ExchangeType] = set()
     for sym in streamer_symbols:
         if sym.startswith("/") or sym.startswith("./"):
@@ -26,7 +25,6 @@ def exchanges_for_symbols(streamer_symbols: list[str]) -> set[ExchangeType]:
 
 
 def get_next_open_time(session, current_time: datetime) -> datetime | None:
-    """Determine next market open time based on current status."""
     if session.status == MarketStatus.PRE_MARKET:
         return session.open_at
     if session.status == MarketStatus.CLOSED:
@@ -40,7 +38,6 @@ def get_next_open_time(session, current_time: datetime) -> datetime | None:
 
 
 async def market_status_message(session: Session, exchanges: set[ExchangeType]) -> str | None:
-    """Check if relevant markets are closed and return a message, or None if open."""
     market_sessions = await get_market_sessions(session, list(exchanges))
 
     current_time = datetime.now(UTC)
@@ -81,7 +78,6 @@ async def stream_events(
     streamer_symbols: list[str],
     timeout: float,
 ) -> list[Any]:
-    """Generic streaming helper for Quote/Greeks events."""
     events_by_symbol: dict[str, Any] = {}
     expected = set(streamer_symbols)
     exchanges = exchanges_for_symbols(streamer_symbols)
@@ -119,7 +115,7 @@ async def stream_quotes_with_trade_fallback(
     index_symbols: set[str],
     timeout: float,
 ) -> list[Quote | Trade]:
-    """Stream quotes, falling back to Trade events for index symbols."""
+    """DXLink omits Quote events for some indices, so accept their Trade events."""
     events_by_symbol: dict[str, Quote | Trade] = {}
     expected = set(streamer_symbols)
     exchanges = exchanges_for_symbols(streamer_symbols)

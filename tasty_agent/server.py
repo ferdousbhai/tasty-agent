@@ -3,7 +3,7 @@ import logging
 from datetime import UTC, datetime
 from decimal import Decimal
 from html import escape as escape_xml_text
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import humanize
 from aiolimiter import AsyncLimiter
@@ -34,11 +34,11 @@ from tasty_agent.orders import (
     OrderLeg,
     OrderSizingPolicy,
     OrderSizingResult,
+    PricingPolicy,
     apply_order_sizing,
     build_new_order,
     build_order_legs,
     build_order_market,
-    default_pricing_policy,
     find_live_order,
     format_order_market,
     format_signed_money,
@@ -51,7 +51,9 @@ from tasty_agent.watchlists import WatchlistSymbol, manage_watchlist
 
 logger = logging.getLogger(__name__)
 
-rate_limiter = AsyncLimiter(2, 1)  # 2 requests per second
+TASTYTRADE_MAX_REQUESTS_PER_SECOND = 2
+BROKER_RATE_LIMIT_WINDOW_SECONDS = 1
+rate_limiter = AsyncLimiter(TASTYTRADE_MAX_REQUESTS_PER_SECOND, BROKER_RATE_LIMIT_WINDOW_SECONDS)
 
 mcp_app = FastMCP("TastyTrade", lifespan=lifespan)
 
@@ -72,7 +74,6 @@ TOOL_XML_TAGS = {
 
 
 def tool_xml(tool_name: str, payload: Any, *, error: bool = False) -> str:
-    """Format MCP tool output as one concise XML block."""
     tag_name = TOOL_XML_TAGS[tool_name]
     attrs = ' error="true"' if error else ""
     text = payload if isinstance(payload, str) else json.dumps(payload, allow_nan=False, separators=(",", ":"))
@@ -80,19 +81,21 @@ def tool_xml(tool_name: str, payload: Any, *, error: bool = False) -> str:
 
 
 def main() -> None:
-    """CLI entry point — accepts optional transport argument (stdio, sse, streamable-http)."""
     import sys
 
-    valid = ("stdio", "sse", "streamable-http")
-    transport = sys.argv[1] if len(sys.argv) > 1 else "stdio"
-    if transport not in valid:
-        print(f"Invalid transport '{transport}'. Must be one of: {', '.join(valid)}", file=sys.stderr)
+    valid_transports = ("stdio", "sse", "streamable-http")
+    requested_transport = sys.argv[1] if len(sys.argv) > 1 else "stdio"
+    if requested_transport not in valid_transports:
+        print(
+            f"Invalid transport '{requested_transport}'. Must be one of: {', '.join(valid_transports)}",
+            file=sys.stderr,
+        )
         sys.exit(1)
-    mcp_app.run(transport)  # type: ignore[arg-type]  # validated above
+    transport = cast(Literal["stdio", "sse", "streamable-http"], requested_transport)
+    mcp_app.run(transport)
 
 
 async def _fetch_order_market(ctx: Context, instrument_details: list[InstrumentDetail], legs: list[Any]):
-    """Fetch current quotes and build the signed net market for order legs."""
     session = get_session(ctx)
     quotes = await _stream_events(session, Quote, [d.streamer_symbol for d in instrument_details], timeout=10.0)
     return build_order_market(instrument_details, legs, quotes)
@@ -103,15 +106,13 @@ async def _resolve_order_inputs(
     legs: list[OrderLeg],
     target_value: float | None,
 ) -> tuple[list[InstrumentDetail], list[OrderLeg], Decimal, OrderSizingResult | None]:
-    """Resolve instruments and determine the order price."""
     session = get_session(ctx)
     instrument_specs = [leg.to_instrument_spec() for leg in legs]
     instrument_details = await get_instrument_details(session, instrument_specs)
 
     try:
-        pricing_policy = default_pricing_policy()
         market = await _fetch_order_market(ctx, instrument_details, legs)
-        resolved_price, warnings = resolve_order_price(market, pricing_policy)
+        resolved_price, warnings = resolve_order_price(market, PricingPolicy())
         sizing_policy = None
         if target_value is not None:
             sizing_policy = OrderSizingPolicy(
@@ -145,7 +146,6 @@ async def _place_new_order(
     target_value: float | None,
     dry_run: bool,
 ) -> dict[str, Any]:
-    """Resolve a new order and place it."""
     context = get_context(ctx)
     instrument_details, sized_legs, resolved_price, sizing_result = await _resolve_order_inputs(
         ctx,
@@ -166,7 +166,6 @@ async def _place_new_order(
 
 
 async def _find_live_order(ctx: Context, order_id: str):
-    """Return a live order by id, raising a helpful error if missing."""
     context = get_context(ctx)
     return await find_live_order(context.account, context.session, order_id)
 
@@ -175,22 +174,14 @@ async def _resolve_replacement_price(
     ctx: Context,
     broker_legs: list[Any],
 ) -> Decimal:
-    """Resolve and validate a replacement order price against existing live order legs."""
     if not broker_legs:
         raise ValueError("Cannot replace an order without live order legs.")
 
     session = get_session(ctx)
     instrument_details = await get_order_leg_instrument_details(session, broker_legs)
     market = await _fetch_order_market(ctx, instrument_details, broker_legs)
-    return await _resolve_replacement_market_price(ctx, market)
 
-
-async def _resolve_replacement_market_price(
-    ctx: Context,
-    market,
-) -> Decimal:
-    pricing_policy = default_pricing_policy()
-    resolved_price, warnings = resolve_order_price(market, pricing_policy)
+    resolved_price, warnings = resolve_order_price(market, PricingPolicy())
     for warning in warnings:
         await ctx.warning(warning)
     await ctx.info(
