@@ -55,7 +55,7 @@ line-length = 120
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM"]
-ignore = ["E501"]  # Line length handled by formatter
+ignore = ["E501"]
 
 [tool.pyright]
 pythonVersion = "3.12"

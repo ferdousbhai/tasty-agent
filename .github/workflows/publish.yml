@@ -3,18 +3,18 @@ name: Publish and Deploy
 on:
   push:
     tags:
-      - 'v*'  # Triggers on version tags like v1.0.0, v0.2.1, etc.
+      - 'v*'
 
 jobs:
   publish:
     runs-on: ubuntu-latest
-    environment: pypi  # Optional: for extra security
+    environment: pypi  # Apply configured PyPI protection rules before publishing.
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
     - uses: actions/checkout@v4
       with:
-        fetch-depth: 0  # Needed for hatch-vcs
+        fetch-depth: 0  # hatch-vcs derives the package version from Git tags.
 
     - name: Derive release version
       id: version

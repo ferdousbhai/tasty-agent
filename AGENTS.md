@@ -1,33 +1,34 @@
 # tasty-agent
 
-## Delivery
+MCP server for Tastytrade account data, market data, watchlists, and order workflows.
 
-Prefer `main` — branches/PRs only if asked or for isolated experiments. For small/docs changes, lightweight checks are fine; otherwise simplify diff, fix blocking issues, run checks, then commit and push `origin/main`.
+## Code index
 
-## Rules
+- `tasty_agent/server.py` — FastMCP tools, transport entry point, rate limiting, and orchestration
+- `tasty_agent/orders.py` — instrument resolution, leg construction, quote-derived pricing, tick rounding, and budget sizing
+- `tasty_agent/core.py` — session and account lifecycle
+- `tasty_agent/market_data.py` — DXLink quotes and Greeks
+- `tasty_agent/account_helpers.py` — compact account, balance, position, order, and transaction output
+- `tasty_agent/watchlists.py` — watchlist operations
+- `tests/` — unit and credential-gated integration tests
+- `examples/` — local clients and deployment examples
+- `commands/portfolio.md` — Claude Code command surface
+- `skills/trading/SKILL.md` — Claude Code trading skill
 
-- Respect the existing 2 req/s limiter (`aiolimiter`) — do not add parallel SDK calls without throttling.
-- Option chains are cached 24h (`aiocache`) — invalidate explicitly when testing chain changes.
-- Pricing is tick-rounded quote-derived mid — use `orders.py` helpers, do not hand-roll.
-- Keep tool output shape compact (selected fields) — do not return full SDK dumps.
+## Boundaries
 
-## Index
-
-- [tasty_agent/server.py](tasty_agent/server.py) — MCP tools and orchestration
-- [tasty_agent/orders.py](tasty_agent/orders.py) — instrument resolution, leg building, tick-rounded pricing, budget sizing
-- [tasty_agent/core.py](tasty_agent/core.py) — client/session
-- [tasty_agent/market_data.py](tasty_agent/market_data.py) — quotes/Greeks via DXLink
-- [tasty_agent/account_helpers.py](tasty_agent/account_helpers.py) — account helpers
-- [tasty_agent/watchlists.py](tasty_agent/watchlists.py) — watchlists
-- [examples/chat.py](examples/chat.py) — interactive test client
-- [examples/mcp_client.py](examples/mcp_client.py) — remote MCP client
-- [tests/](tests/) — `uv run pytest`
+- All SDK calls share the existing two-requests-per-second limiter.
+- Option chains use the existing 24-hour cache; tests that depend on chain changes must invalidate it explicitly.
+- Order pricing must use the helpers in `orders.py`; preserve signed debit/credit semantics and broker dry-run safety.
+- Keep MCP output compact and never replace selected projections with full SDK payloads.
 
 ## Commands
 
-```bash
-uv run tasty-agent                # stdio
-uv run tasty-agent sse
-uv run tasty-agent streamable-http
+```sh
 uv run pytest
+uv run ruff check .
+uv run ruff format --check .
+uv run pyright
 ```
+
+Credential-gated tests and live brokerage calls require explicit authorization.
