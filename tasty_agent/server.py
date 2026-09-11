@@ -32,9 +32,7 @@ from tasty_agent.orders import (
     InstrumentSpec,
     OptionSpec,
     OrderLeg,
-    OrderSizingPolicy,
     OrderSizingResult,
-    PricingPolicy,
     apply_order_sizing,
     build_new_order,
     build_order_legs,
@@ -112,15 +110,9 @@ async def _resolve_order_inputs(
 
     try:
         market = await _fetch_order_market(ctx, instrument_details, legs)
-        resolved_price, warnings = resolve_order_price(market, PricingPolicy())
-        sizing_policy = None
-        if target_value is not None:
-            sizing_policy = OrderSizingPolicy(
-                target_value=Decimal(str(target_value)),
-                min_quantity=1,
-                max_quantity=None,
-            )
-        sized_legs, sizing_result = apply_order_sizing(instrument_details, legs, resolved_price, sizing_policy)
+        resolved_price, warnings = resolve_order_price(market)
+        target = Decimal(str(target_value)) if target_value is not None else None
+        sized_legs, sizing_result = apply_order_sizing(instrument_details, legs, resolved_price, target)
         for warning in warnings:
             await ctx.warning(warning)
         await ctx.info(
@@ -181,7 +173,7 @@ async def _resolve_replacement_price(
     instrument_details = await get_order_leg_instrument_details(session, broker_legs)
     market = await _fetch_order_market(ctx, instrument_details, broker_legs)
 
-    resolved_price, warnings = resolve_order_price(market, PricingPolicy())
+    resolved_price, warnings = resolve_order_price(market)
     for warning in warnings:
         await ctx.warning(warning)
     await ctx.info(

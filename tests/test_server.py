@@ -36,8 +36,6 @@ from tasty_agent.orders import (
     InstrumentSpec,
     OptionSpec,
     OrderLeg,
-    OrderSizingPolicy,
-    PricingPolicy,
     _option_chain_key_builder,
     apply_order_sizing,
     build_order_legs,
@@ -763,7 +761,7 @@ class TestOrderPricing:
             [leg],
             [self.quote("1.00", "1.20")],
         )
-        price, warnings = resolve_order_price(market, PricingPolicy())
+        price, warnings = resolve_order_price(market)
 
         assert market.natural_price == Decimal("-1.20")
         assert market.passive_price == Decimal("-1.00")
@@ -779,7 +777,7 @@ class TestOrderPricing:
             [leg],
             [self.quote("1.00", "1.20")],
         )
-        price, warnings = resolve_order_price(market, PricingPolicy())
+        price, warnings = resolve_order_price(market)
 
         assert market.natural_price == Decimal("-1.20")
         assert market.passive_price == Decimal("-1.00")
@@ -797,7 +795,7 @@ class TestOrderPricing:
             [buy_leg, sell_leg],
             [self.quote("1.00", "1.20"), self.quote("0.50", "0.60")],
         )
-        price, warnings = resolve_order_price(market, PricingPolicy())
+        price, warnings = resolve_order_price(market)
 
         assert market.natural_price == Decimal("-0.70")
         assert market.passive_price == Decimal("-0.40")
@@ -814,7 +812,7 @@ class TestOrderPricing:
         leg = OrderLeg(symbol="/ESM26", action=OrderAction.BUY, quantity=1)
         market = build_order_market([self.future_detail("/ESM26")], [leg], [self.quote("100.00", "100.50")])
 
-        price, warnings = resolve_order_price(market, PricingPolicy())
+        price, warnings = resolve_order_price(market)
 
         assert market.tick_size == Decimal("0.25")
         assert price == Decimal("-100.25")
@@ -831,7 +829,7 @@ class TestOrderPricing:
         ]
         market = build_order_market([detail], [leg], [self.quote("0.1234", "0.1236")])
 
-        price, warnings = resolve_order_price(market, PricingPolicy())
+        price, warnings = resolve_order_price(market)
 
         assert market.tick_size == Decimal("0.0001")
         assert price == Decimal("-0.1235")
@@ -848,7 +846,7 @@ class TestOrderPricing:
         ]
         market = build_order_market([detail], [leg], [self.quote("189.991", "190.009")])
 
-        price, warnings = resolve_order_price(market, PricingPolicy())
+        price, warnings = resolve_order_price(market)
 
         assert market.tick_size == Decimal("0.01")
         assert price == Decimal("-190.00")
@@ -884,7 +882,7 @@ class TestOrderPricing:
         ]
         market = build_order_market([detail], [leg], [self.quote("19.67", "19.69")])
 
-        price, warnings = resolve_order_price(market, PricingPolicy())
+        price, warnings = resolve_order_price(market)
 
         assert market.mid_price == Decimal("-19.68")
         assert market.tick_size == Decimal("0.05")
@@ -904,7 +902,7 @@ class TestOrderPricing:
         detail.tick_sizes = [TickSize(value=Decimal("0.05"), threshold=None)]
         market = build_order_market([detail], [leg], [self.quote("1.11", "1.13")])
 
-        price, warnings = resolve_order_price(market, PricingPolicy())
+        price, warnings = resolve_order_price(market)
 
         assert market.mid_price == Decimal("-1.12")
         assert market.tick_size == Decimal("0.05")
@@ -933,13 +931,12 @@ class TestOrderPricing:
 
     def test_target_value_sizes_option_contract_quantity(self):
         leg = OrderLeg(symbol="TSLA", action=OrderAction.BUY_TO_OPEN)
-        sizing = OrderSizingPolicy(target_value=Decimal("50000"), min_quantity=1, max_quantity=None)
 
         sized_legs, sizing_result = apply_order_sizing(
             [self.option_detail("TSLA_300C")],
             [leg],
             Decimal("-10"),
-            sizing,
+            Decimal("50000"),
         )
 
         assert sized_legs[0].quantity == 50
@@ -950,13 +947,12 @@ class TestOrderPricing:
 
     def test_target_value_sizes_equity_share_quantity(self):
         leg = OrderLeg(symbol="TSLA", action=OrderAction.BUY_TO_OPEN)
-        sizing = OrderSizingPolicy(target_value=Decimal("50000"), min_quantity=1, max_quantity=None)
 
         sized_legs, sizing_result = apply_order_sizing(
             [self.equity_detail("TSLA")],
             [leg],
             Decimal("-250"),
-            sizing,
+            Decimal("50000"),
         )
 
         assert sized_legs[0].quantity == 200
@@ -967,13 +963,12 @@ class TestOrderPricing:
     def test_target_value_scales_multi_leg_spread_ratio(self):
         buy_leg = OrderLeg(symbol="TSLA", action=OrderAction.BUY_TO_OPEN, quantity=2)
         sell_leg = OrderLeg(symbol="TSLA", action=OrderAction.SELL_TO_OPEN, quantity=1)
-        sizing = OrderSizingPolicy(target_value=Decimal("50000"), min_quantity=1, max_quantity=None)
 
         sized_legs, sizing_result = apply_order_sizing(
             [self.option_detail("TSLA_300C"), self.option_detail("TSLA_320C")],
             [buy_leg, sell_leg],
             Decimal("-5"),
-            sizing,
+            Decimal("50000"),
         )
 
         assert [leg.quantity for leg in sized_legs] == [200, 100]
@@ -984,10 +979,9 @@ class TestOrderPricing:
 
     def test_target_value_requires_reduced_leg_ratio(self):
         leg = OrderLeg(symbol="TSLA", action=OrderAction.BUY_TO_OPEN, quantity=17)
-        sizing = OrderSizingPolicy(target_value=Decimal("50000"), min_quantity=1, max_quantity=None)
 
         with pytest.raises(ValueError, match="smallest whole-number ratio"):
-            apply_order_sizing([self.option_detail("TSLA_300C")], [leg], Decimal("-10"), sizing)
+            apply_order_sizing([self.option_detail("TSLA_300C")], [leg], Decimal("-10"), Decimal("50000"))
 
 
 class TestPydanticModels:

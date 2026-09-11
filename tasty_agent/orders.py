@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import ROUND_FLOOR, ROUND_HALF_UP, Decimal
@@ -39,6 +40,9 @@ BUY_ACTIONS = {
 }
 
 CENT = Decimal("0.01")
+#: Warn when the resolved limit sits further from mid than max of these and one tick.
+MID_DISTANCE_WARNING_FLOOR = Decimal("0.05")
+MID_DISTANCE_WARNING_SPREAD_FRACTION = Decimal("0.25")
 
 
 @dataclass
@@ -140,46 +144,6 @@ class OrderLeg(BaseModel):
             strike_price=self.strike_price,
             expiration_date=self.expiration_date,
         )
-
-
-class PricingPolicy(BaseModel):
-    """Guardrails for quote-derived mid limit pricing."""
-
-    mid_distance_warning_cents: Annotated[
-        int | None,
-        Field(
-            ge=0,
-            description=(
-                "Cent floor for warning when the final limit is far from the current signed net mid-price. "
-                "Set null to disable the cent-based warning."
-            ),
-        ),
-    ] = 5
-    mid_distance_warning_spread_fraction: Annotated[
-        float | None,
-        Field(
-            ge=0,
-            description=(
-                "Spread-relative warning threshold for distance from mid. "
-                "The effective warning threshold is max(mid_distance_warning_cents, spread * this fraction)."
-            ),
-        ),
-    ] = 0.25
-
-
-class OrderSizingPolicy(BaseModel):
-    """Dollar-value based sizing for new orders."""
-
-    target_value: Decimal = Field(
-        ...,
-        gt=0,
-        description=(
-            "Total dollar premium/notional budget for the order. "
-            "The tool derives whole share/contract quantities from live quote-derived pricing."
-        ),
-    )
-    min_quantity: int = Field(1, ge=1, description="Minimum computed order units required.")
-    max_quantity: int | None = Field(None, ge=1, description="Optional cap on computed order units.")
 
 
 @dataclass(frozen=True)
@@ -440,11 +404,7 @@ def _mid_price(market: OrderMarket) -> Decimal:
     return candidate
 
 
-def _validate_limit_price(
-    market: OrderMarket,
-    candidate: Decimal,
-    pricing: PricingPolicy,
-) -> list[str]:
+def _validate_limit_price(market: OrderMarket, candidate: Decimal) -> list[str]:
     warnings: list[str] = []
 
     outside_market = candidate < market.natural_price or candidate > market.passive_price
@@ -470,13 +430,11 @@ def _validate_limit_price(
             f"using boundary price {format_signed_money(candidate)} within {format_order_market(market)}."
         )
 
-    warning_thresholds: list[Decimal] = []
-    if pricing.mid_distance_warning_cents is not None:
-        warning_thresholds.append(Decimal(pricing.mid_distance_warning_cents) / Decimal("100"))
-    if pricing.mid_distance_warning_spread_fraction is not None:
-        warning_thresholds.append(market.spread * Decimal(str(pricing.mid_distance_warning_spread_fraction)))
-    warning_thresholds.append(market.tick_size)
-    warning_threshold = max(warning_thresholds)
+    warning_threshold = max(
+        MID_DISTANCE_WARNING_FLOOR,
+        market.spread * MID_DISTANCE_WARNING_SPREAD_FRACTION,
+        market.tick_size,
+    )
     distance = abs(candidate - market.mid_price)
     if distance > warning_threshold:
         warnings.append(
@@ -488,12 +446,9 @@ def _validate_limit_price(
     return warnings
 
 
-def resolve_order_price(
-    market: OrderMarket,
-    pricing: PricingPolicy,
-) -> tuple[Decimal, list[str]]:
+def resolve_order_price(market: OrderMarket) -> tuple[Decimal, list[str]]:
     candidate = _mid_price(market)
-    warnings = _validate_limit_price(market, candidate, pricing)
+    warnings = _validate_limit_price(market, candidate)
     return candidate, warnings
 
 
@@ -517,10 +472,12 @@ def apply_order_sizing(
     instrument_details: list[InstrumentDetail],
     legs: list[OrderLeg],
     price: Decimal,
-    sizing: OrderSizingPolicy | None,
+    target_value: Decimal | None,
 ) -> tuple[list[OrderLeg], OrderSizingResult | None]:
-    if sizing is None:
+    if target_value is None:
         return legs, None
+    if target_value <= 0:
+        raise ValueError("target_value must be greater than 0")
     if not legs or len(instrument_details) != len(legs):
         raise ValueError(f"Mismatched sizing inputs: {len(instrument_details)} instruments vs {len(legs)} legs")
 
@@ -535,17 +492,15 @@ def apply_order_sizing(
     if unit_value <= 0:
         raise ValueError("Cannot size an order with a zero dollar unit value")
 
-    computed_quantity = int((sizing.target_value / unit_value).to_integral_value(rounding=ROUND_FLOOR))
-    if sizing.max_quantity is not None:
-        computed_quantity = min(computed_quantity, sizing.max_quantity)
-    if computed_quantity < sizing.min_quantity:
+    computed_quantity = int((target_value / unit_value).to_integral_value(rounding=ROUND_FLOOR))
+    if computed_quantity < 1:
         raise ValueError(
-            f"target_value ${sizing.target_value} is too small for one order unit at ${unit_value.quantize(CENT)}."
+            f"target_value ${target_value} is too small for one order unit at ${unit_value.quantize(CENT)}."
         )
 
     sized_legs = [leg.model_copy(update={"quantity": leg.quantity * computed_quantity}) for leg in legs]
     result = OrderSizingResult(
-        target_value=sizing.target_value,
+        target_value=target_value,
         unit_value=unit_value,
         quantity=computed_quantity,
         estimated_value=unit_value * computed_quantity,
@@ -595,7 +550,15 @@ def resolve_instrument_type(spec: InstrumentSpec) -> InstrumentType:
     return InstrumentType.EQUITY
 
 
-async def _lookup_option_detail(session: Session, spec: InstrumentSpec, symbol: str) -> InstrumentDetail:
+async def _lookup_option_contract_detail(
+    session: Session,
+    spec: InstrumentSpec,
+    symbol: str,
+    *,
+    chain_getter: Callable[[Session, str], Awaitable[Any]],
+    label: str,
+    attach_underlying_tick_sizes: bool,
+) -> InstrumentDetail:
     if not spec.option_type:
         raise ValueError(f"option_type ('C' or 'P') is required for option {symbol}")
     option_type = spec.option_type
@@ -605,10 +568,10 @@ async def _lookup_option_detail(session: Session, spec: InstrumentSpec, symbol: 
         raise ValueError(f"expiration_date is required for option {symbol}")
 
     target_date = validate_date_format(expiration_date)
-    chain = await get_cached_option_chain(session, symbol)
+    chain = await chain_getter(session, symbol)
     if target_date not in chain:
         available_dates = sorted(chain.keys())
-        raise ValueError(f"No options found for {symbol} expiration {expiration_date}. Available: {available_dates}")
+        raise ValueError(f"No {label}s found for {symbol} expiration {expiration_date}. Available: {available_dates}")
 
     matching_options = [
         option
@@ -616,11 +579,13 @@ async def _lookup_option_detail(session: Session, spec: InstrumentSpec, symbol: 
         if Decimal(str(option.strike_price)) == strike_price and option.option_type.value == option_type
     ]
     if len(matching_options) > 1:
-        raise ValueError(f"Ambiguous option contract: {symbol} {expiration_date} {option_type} {strike_price}")
+        raise ValueError(f"Ambiguous {label} contract: {symbol} {expiration_date} {option_type} {strike_price}")
     if matching_options:
         option = matching_options[0]
         if not option.streamer_symbol:
-            raise ValueError(f"Option contract is missing streamer symbol: {option.symbol}")
+            raise ValueError(f"{label.capitalize()} contract is missing streamer symbol: {option.symbol}")
+        if not attach_underlying_tick_sizes:
+            return InstrumentDetail(option.streamer_symbol, option)
         underlying = await Equity.get(session, symbol)
         return InstrumentDetail(
             option.streamer_symbol,
@@ -630,43 +595,7 @@ async def _lookup_option_detail(session: Session, spec: InstrumentSpec, symbol: 
 
     available_strikes = [opt.strike_price for opt in chain[target_date] if opt.option_type.value == option_type]
     raise ValueError(
-        f"Option not found: {symbol} {expiration_date} {option_type} {strike_price}. Available strikes: {sorted(set(available_strikes))}"
-    )
-
-
-async def _lookup_future_option_detail(session: Session, spec: InstrumentSpec, symbol: str) -> InstrumentDetail:
-    if not spec.option_type:
-        raise ValueError(f"option_type ('C' or 'P') is required for option {symbol}")
-    option_type = spec.option_type
-    strike_price = Decimal(str(validate_strike_price(spec.strike_price)))
-    expiration_date = spec.expiration_date
-    if not expiration_date:
-        raise ValueError(f"expiration_date is required for option {symbol}")
-
-    target_date = validate_date_format(expiration_date)
-    chain = await get_cached_future_option_chain(session, symbol)
-    if target_date not in chain:
-        available_dates = sorted(chain.keys())
-        raise ValueError(
-            f"No futures options found for {symbol} expiration {expiration_date}. Available: {available_dates}"
-        )
-
-    matching_options = [
-        option
-        for option in chain[target_date]
-        if Decimal(str(option.strike_price)) == strike_price and option.option_type.value == option_type
-    ]
-    if len(matching_options) > 1:
-        raise ValueError(f"Ambiguous futures option contract: {symbol} {expiration_date} {option_type} {strike_price}")
-    if matching_options:
-        option = matching_options[0]
-        if not option.streamer_symbol:
-            raise ValueError(f"Futures option contract is missing streamer symbol: {option.symbol}")
-        return InstrumentDetail(option.streamer_symbol, option)
-
-    available_strikes = [opt.strike_price for opt in chain[target_date] if opt.option_type.value == option_type]
-    raise ValueError(
-        f"Futures option not found: {symbol} {expiration_date} {option_type} {strike_price}. Available strikes: {sorted(set(available_strikes))}"
+        f"{label.capitalize()} not found: {symbol} {expiration_date} {option_type} {strike_price}. Available strikes: {sorted(set(available_strikes))}"
     )
 
 
@@ -731,10 +660,24 @@ async def get_instrument_details(session: Session, instrument_specs: list[Instru
         resolved_type = resolve_instrument_type(spec)
 
         if resolved_type == InstrumentType.EQUITY_OPTION:
-            return await _lookup_option_detail(session, spec, symbol)
+            return await _lookup_option_contract_detail(
+                session,
+                spec,
+                symbol,
+                chain_getter=get_cached_option_chain,
+                label="option",
+                attach_underlying_tick_sizes=True,
+            )
 
         if resolved_type == InstrumentType.FUTURE_OPTION:
-            return await _lookup_future_option_detail(session, spec, symbol)
+            return await _lookup_option_contract_detail(
+                session,
+                spec,
+                symbol,
+                chain_getter=get_cached_future_option_chain,
+                label="futures option",
+                attach_underlying_tick_sizes=False,
+            )
 
         if resolved_type == InstrumentType.FUTURE:
             return await _lookup_future_detail(session, symbol)
