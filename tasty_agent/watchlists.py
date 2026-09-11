@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Literal
+from typing import Any, Literal, assert_never
 
 from mcp.server.fastmcp import Context
 from pydantic import BaseModel, Field
@@ -92,7 +92,12 @@ async def manage_watchlist(
     if action == "add":
         return await _add_watchlist_symbols(ctx, session, effective_name, symbols)
 
-    return await _remove_watchlist_symbols(ctx, session, effective_name, symbols)
+    if action == "remove":
+        return await _remove_watchlist_symbols(ctx, session, effective_name, symbols)
+
+    # Dead at runtime: FastMCP validates action against the Literal. Kept so a
+    # fifth action fails the type check rather than silently removing symbols.
+    assert_never(action)
 
 
 async def _add_watchlist_symbols(

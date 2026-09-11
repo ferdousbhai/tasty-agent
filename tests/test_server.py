@@ -96,6 +96,11 @@ def broker_order_response(leg: Leg):
 
 
 class TestToTable:
+    def test_empty_data_returns_no_data(self):
+        # to_table's early return is what list_orders, get_history and get_quotes
+        # emit when the broker returns nothing; tabulate would render "".
+        assert to_table([]) == "No data"
+
     def test_formats_pydantic_models(self):
         specs = [
             InstrumentSpec(symbol="AAPL"),

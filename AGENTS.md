@@ -17,7 +17,7 @@ MCP server for Tastytrade account data, market data, watchlists, and order workf
 
 ## Boundaries
 
-- The history, order and symbol-search tools hold the two-requests-per-second limiter in `server.py`; the other tools call the SDK directly.
+- All broker SDK calls must share the two-requests-per-second limiter in `server.py`. Today only the history, order and symbol-search tools take it; the rest calling the SDK directly is a known gap to close, not a licence to add more unthrottled calls.
 - Option chains use the existing 24-hour cache; tests that depend on chain changes must invalidate it explicitly.
 - Order pricing must use the helpers in `orders.py`; preserve signed debit/credit semantics and broker dry-run safety.
 - Keep MCP output compact and never replace selected projections with full SDK payloads.
