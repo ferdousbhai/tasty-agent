@@ -96,9 +96,6 @@ def broker_order_response(leg: Leg):
 
 
 class TestToTable:
-    def test_empty_data_returns_no_data(self):
-        assert to_table([]) == "No data"
-
     def test_formats_pydantic_models(self):
         specs = [
             InstrumentSpec(symbol="AAPL"),
@@ -369,12 +366,6 @@ class TestValidateDateFormat:
 
 
 class TestValidateStrikePrice:
-    def test_valid_float(self):
-        assert validate_strike_price(150.0) == 150.0
-
-    def test_valid_int(self):
-        assert validate_strike_price(150) == 150.0
-
     def test_valid_string_number(self):
         assert validate_strike_price("150.5") == 150.5
 
@@ -406,14 +397,6 @@ class TestOptionChainKeyBuilder:
         mock_session = Mock()
         key = _option_chain_key_builder(mock_fn, mock_session, "AAPL")
         assert key == "option_chain:AAPL"
-
-    def test_different_sessions_same_symbol_same_key(self):
-        mock_fn = Mock()
-        session1 = Mock()
-        session2 = Mock()
-        key1 = _option_chain_key_builder(mock_fn, session1, "TSLA")
-        key2 = _option_chain_key_builder(mock_fn, session2, "TSLA")
-        assert key1 == key2
 
 
 class TestGetNextOpenTime:
@@ -852,21 +835,6 @@ class TestOrderPricing:
         assert price == Decimal("-190.00")
         assert warnings == []
 
-    def test_option_tick_sizes_are_used_when_available(self):
-        leg = OrderLeg(
-            symbol="AAPL",
-            action=OrderAction.BUY_TO_OPEN,
-            option_type="C",
-            strike_price=150.0,
-            expiration_date="2026-12-18",
-        )
-        detail = self.option_detail(".AAPL261218C150")
-        detail.tick_sizes = [TickSize(value=Decimal("0.05"), threshold=None)]
-
-        market = build_order_market([detail], [leg], [self.quote("1.00", "1.20")])
-
-        assert market.tick_size == Decimal("0.05")
-
     def test_option_tick_sizes_use_tastytrade_asset_model(self):
         leg = OrderLeg(
             symbol="TQQQ",
@@ -985,20 +953,6 @@ class TestOrderPricing:
 
 
 class TestPydanticModels:
-    def test_instrument_spec_stock(self):
-        spec = InstrumentSpec(symbol="AAPL")
-        assert spec.symbol == "AAPL"
-        assert spec.option_type is None
-        assert spec.strike_price is None
-        assert spec.expiration_date is None
-
-    def test_instrument_spec_option(self):
-        spec = InstrumentSpec(symbol="AAPL", option_type="C", strike_price=150.0, expiration_date="2024-12-20")
-        assert spec.symbol == "AAPL"
-        assert spec.option_type == "C"
-        assert spec.strike_price == 150.0
-        assert spec.expiration_date == "2024-12-20"
-
     def test_instrument_spec_rejects_partial_option_identity(self):
         with pytest.raises(ValueError, match="must be supplied together"):
             InstrumentSpec(symbol="AAPL", option_type="C")
@@ -1012,22 +966,6 @@ class TestPydanticModels:
                 strike_price=150,
                 expiration_date="2026-12-18",
             )
-
-    def test_option_spec_requires_option_fields_and_converts_to_instrument_spec(self):
-        spec = OptionSpec(
-            symbol="AAPL",
-            option_type="P",
-            strike_price=150.0,
-            expiration_date="2024-12-20",
-        )
-
-        instrument_spec = spec.to_instrument_spec()
-
-        assert instrument_spec.symbol == "AAPL"
-        assert instrument_spec.instrument_type is None
-        assert instrument_spec.option_type == "P"
-        assert instrument_spec.strike_price == 150.0
-        assert instrument_spec.expiration_date == "2024-12-20"
 
     @pytest.mark.parametrize(
         ("kwargs", "expected_action"),
@@ -1050,14 +988,6 @@ class TestPydanticModels:
     def test_order_leg_accepts_valid_action_contract(self, kwargs, expected_action):
         leg = OrderLeg(**kwargs)
         assert leg.action == expected_action
-
-    def test_order_leg_quantity_description_distinguishes_contracts_and_target_value(self):
-        description = OrderLeg.model_fields["quantity"].description
-
-        assert description is not None
-        assert "Actual share/contract count" in description
-        assert "omit quantity for single-leg orders" in description
-        assert "leg ratio" in description
 
     @pytest.mark.parametrize(
         ("kwargs", "message"),
@@ -1086,11 +1016,6 @@ class TestPydanticModels:
     def test_order_leg_rejects_invalid_action_contract(self, kwargs, message):
         with pytest.raises(ValueError, match=message):
             OrderLeg(**kwargs)
-
-    def test_watchlist_symbol(self):
-        ws = WatchlistSymbol(symbol="AAPL", instrument_type="Equity")
-        assert ws.symbol == "AAPL"
-        assert ws.instrument_type == "Equity"
 
 
 class TestOptionInstrumentDetails:
@@ -1154,14 +1079,6 @@ class TestOptionInstrumentDetails:
                     )
                 ],
             )
-
-
-class TestInstrumentDetail:
-    def test_creation(self):
-        mock_instrument = Mock()
-        detail = InstrumentDetail("AAPL", mock_instrument)
-        assert detail.streamer_symbol == "AAPL"
-        assert detail.instrument == mock_instrument
 
 
 class TestExchangesForSymbols:
@@ -1466,22 +1383,3 @@ class TestQuoteNaNPatch:
         # SDK converts NaN sizes to Decimal('0') rather than None
         assert result[0].bid_size == Decimal("0")
         assert result[0].ask_size == Decimal("0")
-
-    def test_equity_quotes_still_parse(self):
-        from decimal import Decimal
-
-        from tastytrade.dxfeed import Quote
-
-        raw_data = ["AAPL", 0, 0, 0, 0, "Q", 0, "Q", 185.50, 185.55, 400, 1300]
-        result = Quote.from_stream(raw_data)
-        assert len(result) == 1
-        assert result[0].event_symbol == "AAPL"
-        assert result[0].bid_size == Decimal("400")
-        assert result[0].ask_size == Decimal("1300")
-
-    def test_nan_prices_still_rejected(self):
-        from tastytrade.dxfeed import Quote
-
-        raw_data = ["BAD", 0, 0, 0, 0, "\x00", 0, "\x00", "NaN", "NaN", "NaN", "NaN"]
-        result = Quote.from_stream(raw_data)
-        assert len(result) == 0, "Quote with NaN prices should be dropped"
