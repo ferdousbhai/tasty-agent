@@ -625,7 +625,17 @@ class TestOrderTools:
             action=OrderAction.BUY_TO_OPEN,
             quantity=1,
         )
-        account.replace_order = AsyncMock(return_value=broker_order_response(broker_leg))
+        placed_order = Mock(legs=[broker_leg])
+        placed_order.model_dump.return_value = {
+            "id": 12345,
+            "status": "Received",
+            "underlying_symbol": broker_leg.symbol,
+            "order_type": "Limit",
+            "time_in_force": "Day",
+            "price": Decimal("-1.10"),
+            "size": broker_leg.quantity,
+        }
+        account.replace_order = AsyncMock(return_value=placed_order)
         existing_order = Mock(time_in_force=OrderTimeInForce.DAY, legs=[broker_leg])
 
         with (

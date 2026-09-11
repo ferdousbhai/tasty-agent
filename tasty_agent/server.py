@@ -14,7 +14,7 @@ from tastytrade.dxfeed import Greeks, Quote, Trade
 from tastytrade.market_sessions import ExchangeType, MarketStatus, get_market_holidays, get_market_sessions
 from tastytrade.order import OrderTimeInForce
 from tastytrade.search import symbol_search
-from tastytrade.utils import now_in_new_york
+from tastytrade.utils import now_in_new_york, today_in_new_york
 
 from tasty_agent.account_helpers import build_account_overview, compact_order, fetch_history
 from tasty_agent.core import compact_row, compact_value, get_context, get_session, lifespan, to_table
@@ -428,7 +428,9 @@ async def replace_order(ctx: Context, order_id: str) -> str:
                 price=resolved_price,
             ),
         )
-        return tool_xml("replace_order", _compact_order_response(response))
+        # Account.replace_order returns a PlacedOrder (not a PlacedOrderResponse), so the
+        # order/buying-power envelope of _compact_order_response does not apply here.
+        return tool_xml("replace_order", {"order": compact_order(response)})
 
 
 @mcp_app.tool()
@@ -521,8 +523,11 @@ async def market_status(ctx: Context, exchanges: list[Literal["Equity", "CME", "
 
     current_time = datetime.now(UTC)
     calendar = await get_market_holidays(session)
-    is_holiday = current_time.date() in calendar.holidays
-    is_half_day = current_time.date() in calendar.half_days
+    # The holiday calendar is keyed by US equity-market (New York) dates, which diverge
+    # from the UTC date every evening.
+    nyc_today = today_in_new_york()
+    is_holiday = nyc_today in calendar.holidays
+    is_half_day = nyc_today in calendar.half_days
 
     results: list[dict[str, Any]] = []
     for ms in market_sessions:

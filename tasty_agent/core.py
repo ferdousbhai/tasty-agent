@@ -143,18 +143,20 @@ async def lifespan(_) -> AsyncIterator[ServerContext]:
     if account_id is not None and not account_id.strip():
         raise ValueError("TASTYTRADE_ACCOUNT_ID must not be blank when configured.")
 
-    try:
-        session = Session(client_secret, refresh_token)
-        accounts = await Account.get(session)
-        logger.info("Successfully authenticated with Tastytrade. Found %s account(s).", len(accounts))
-    except Exception as e:
-        logger.error("Failed to authenticate with Tastytrade: %s", e, exc_info=True)
-        raise
+    # Session owns an httpx AsyncClient; its context manager is what releases the
+    # connection pool when the server shuts down (or if authentication fails).
+    async with Session(client_secret, refresh_token) as session:
+        try:
+            accounts = await Account.get(session)
+            logger.info("Successfully authenticated with Tastytrade. Found %s account(s).", len(accounts))
+        except Exception as e:
+            logger.error("Failed to authenticate with Tastytrade: %s", e, exc_info=True)
+            raise
 
-    account = select_account(accounts, account_id)
-    if account_id:
-        logger.info("Using specified account: %s", account.account_number)
-    else:
-        logger.info("Using sole account: %s", account.account_number)
+        account = select_account(accounts, account_id)
+        if account_id:
+            logger.info("Using specified account: %s", account.account_number)
+        else:
+            logger.info("Using sole account: %s", account.account_number)
 
-    yield ServerContext(session=session, account=account)
+        yield ServerContext(session=session, account=account)

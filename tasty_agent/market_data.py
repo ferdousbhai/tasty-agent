@@ -124,26 +124,31 @@ async def stream_quotes_with_trade_fallback(
         async with DXLinkStreamer(session) as streamer:
             await streamer.subscribe(Quote, streamer_symbols)
             await streamer.subscribe(Trade, list(index_symbols))
+            # One in-flight get_event task per event type, kept across iterations: cancelling
+            # the still-pending task each pass can discard an event the stream already
+            # handed to it, which is never re-delivered.
+            pending_by_type: dict[type[Quote] | type[Trade], asyncio.Task] = {}
             try:
                 async with asyncio.timeout(timeout):
-                    while len(events_by_symbol) < len(expected):
-                        tasks = (
-                            asyncio.ensure_future(streamer.get_event(Quote)),
-                            asyncio.ensure_future(streamer.get_event(Trade)),
-                        )
-                        try:
-                            done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-                        finally:
-                            for task in tasks:
-                                if not task.done():
-                                    task.cancel()
-                            await asyncio.gather(*tasks, return_exceptions=True)
-                        for task in done:
-                            event = task.result()
-                            if event.event_symbol in expected:
-                                if isinstance(event, Trade) and event.event_symbol in events_by_symbol:
+                    try:
+                        while len(events_by_symbol) < len(expected):
+                            for event_type in (Quote, Trade):
+                                if event_type not in pending_by_type:
+                                    pending_by_type[event_type] = asyncio.ensure_future(streamer.get_event(event_type))
+                            done, _ = await asyncio.wait(pending_by_type.values(), return_when=asyncio.FIRST_COMPLETED)
+                            for event_type, task in list(pending_by_type.items()):
+                                if task not in done:
                                     continue
-                                events_by_symbol[event.event_symbol] = event
+                                del pending_by_type[event_type]
+                                event = task.result()
+                                if event.event_symbol in expected:
+                                    if isinstance(event, Trade) and event.event_symbol in events_by_symbol:
+                                        continue
+                                    events_by_symbol[event.event_symbol] = event
+                    finally:
+                        for task in pending_by_type.values():
+                            task.cancel()
+                        await asyncio.gather(*pending_by_type.values(), return_exceptions=True)
             except TimeoutError:
                 timed_out = True
     except ExceptionGroup as eg:
