@@ -142,9 +142,6 @@ async def build_account_overview(
         include = ["balances", "positions"]
     if not include:
         raise ValueError("include must request balances, positions, or both")
-    unknown_sections = {section for section in include if section not in {"balances", "positions"}}
-    if unknown_sections:
-        raise ValueError(f"Unsupported account overview sections: {sorted(unknown_sections)}")
 
     context = get_context(ctx)
     session = context.session
@@ -175,8 +172,6 @@ async def fetch_history(
     page_offset: int = 0,
     limit: int = 25,
 ) -> str:
-    if type not in {"transactions", "orders"}:
-        raise ValueError("type must be 'transactions' or 'orders'")
     if days is not None and days < 0:
         raise ValueError("days must be non-negative")
     if page_offset < 0:
@@ -199,7 +194,7 @@ async def fetch_history(
             per_page=limit,
             page_offset=page_offset,
         )
-    elif type == "orders":
+    else:
         items = await context.account.get_order_history(
             session,
             start_date=start,
@@ -208,8 +203,6 @@ async def fetch_history(
             page_offset=page_offset,
         )
 
-    if items is None:
-        raise ValueError(f"Broker returned no {type} collection")
     if type == "transactions":
         return to_table([_compact_transaction(item) for item in items])
     return to_table([compact_order(item) for item in items])

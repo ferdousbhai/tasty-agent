@@ -65,8 +65,6 @@ async def manage_watchlist(
     name: str | None = None,
     symbols: list[WatchlistSymbol] | None = None,
 ) -> list[dict[str, Any]] | dict[str, Any]:
-    if watchlist_type not in {"public", "private"}:
-        raise ValueError(f"Unsupported watchlist type: {watchlist_type}")
     if name is not None and not name.strip():
         raise ValueError("watchlist name must not be blank")
     session = get_session(ctx)
@@ -94,9 +92,7 @@ async def manage_watchlist(
     if action == "add":
         return await _add_watchlist_symbols(ctx, session, effective_name, symbols)
 
-    if action == "remove":
-        return await _remove_watchlist_symbols(ctx, session, effective_name, symbols)
-    raise ValueError(f"Unsupported watchlist action: {action}")
+    return await _remove_watchlist_symbols(ctx, session, effective_name, symbols)
 
 
 async def _add_watchlist_symbols(

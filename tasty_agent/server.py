@@ -71,11 +71,10 @@ TOOL_XML_TAGS = {
 }
 
 
-def tool_xml(tool_name: str, payload: Any, *, error: bool = False) -> str:
+def tool_xml(tool_name: str, payload: Any) -> str:
     tag_name = TOOL_XML_TAGS[tool_name]
-    attrs = ' error="true"' if error else ""
     text = payload if isinstance(payload, str) else json.dumps(payload, allow_nan=False, separators=(",", ":"))
-    return f"<{tag_name}{attrs}>{escape_xml_text(text, quote=False)}</{tag_name}>"
+    return f"<{tag_name}>{escape_xml_text(text, quote=False)}</{tag_name}>"
 
 
 def main() -> None:
@@ -111,24 +110,25 @@ async def _resolve_order_inputs(
     try:
         market = await _fetch_order_market(ctx, instrument_details, legs)
         resolved_price, warnings = resolve_order_price(market)
-        target = Decimal(str(target_value)) if target_value is not None else None
-        sized_legs, sizing_result = apply_order_sizing(instrument_details, legs, resolved_price, target)
-        for warning in warnings:
-            await ctx.warning(warning)
-        await ctx.info(
-            f"Resolved limit price {format_signed_money(resolved_price)} from mid ({format_order_market(market)})."
-        )
-        logger.info(f"Auto-calculated price {resolved_price} for {len(legs)}-leg order")
-        if sizing_result is not None:
-            await ctx.info(
-                f"Sized order to {sizing_result.quantity} unit(s): "
-                f"${sizing_result.estimated_value.quantize(Decimal('0.01'))} estimated value "
-                f"from ${sizing_result.target_value} target."
-            )
-        return instrument_details, sized_legs, resolved_price, sizing_result
     except Exception as e:
         logger.warning(f"Failed to resolve safe price for order legs {[leg.symbol for leg in legs]}: {e!s}")
         raise ValueError(f"Could not resolve a safe limit price from live quotes: {e!s}") from e
+
+    target = Decimal(str(target_value)) if target_value is not None else None
+    sized_legs, sizing_result = apply_order_sizing(instrument_details, legs, resolved_price, target)
+    for warning in warnings:
+        await ctx.warning(warning)
+    await ctx.info(
+        f"Resolved limit price {format_signed_money(resolved_price)} from mid ({format_order_market(market)})."
+    )
+    logger.info(f"Auto-calculated price {resolved_price} for {len(legs)}-leg order")
+    if sizing_result is not None:
+        await ctx.info(
+            f"Sized order to {sizing_result.quantity} unit(s): "
+            f"${sizing_result.estimated_value.quantize(Decimal('0.01'))} estimated value "
+            f"from ${sizing_result.target_value} target."
+        )
+    return instrument_details, sized_legs, resolved_price, sizing_result
 
 
 async def _place_new_order(
@@ -206,6 +206,14 @@ def _compact_messages(messages: list[Any] | None) -> list[str] | None:
     return compacted
 
 
+def _compact_money_model(model) -> dict[str, Any]:
+    return compact_row(
+        {key: compact_value(value) for key, value in model.model_dump().items()},
+        drop_zero_string=True,
+        drop_numeric_zero=True,
+    )
+
+
 def _compact_order_response(response) -> dict[str, Any]:
     warnings = _compact_messages(getattr(response, "warnings", None))
     errors = _compact_messages(getattr(response, "errors", None))
@@ -219,20 +227,12 @@ def _compact_order_response(response) -> dict[str, Any]:
         raise ValueError(f"Broker order response is missing required order or buying-power data.{warning_context}")
     result: dict[str, Any] = {
         "order": compact_order(order),
-        "bp_effect": compact_row(
-            {key: compact_value(value) for key, value in buying_power_effect.model_dump().items()},
-            drop_zero_string=True,
-            drop_numeric_zero=True,
-        ),
+        "bp_effect": _compact_money_model(buying_power_effect),
     }
 
     fee_calculation = getattr(response, "fee_calculation", None)
     if fee_calculation:
-        result["fees"] = compact_row(
-            {key: compact_value(value) for key, value in fee_calculation.model_dump().items()},
-            drop_zero_string=True,
-            drop_numeric_zero=True,
-        )
+        result["fees"] = _compact_money_model(fee_calculation)
 
     if warnings:
         result["warnings"] = warnings
