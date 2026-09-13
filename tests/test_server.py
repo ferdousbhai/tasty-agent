@@ -403,6 +403,14 @@ class TestOptionChainKeyBuilder:
         key = _option_chain_key_builder(mock_fn, mock_session, "AAPL")
         assert key == "option_chain:AAPL"
 
+    def test_different_sessions_same_symbol_same_key(self):
+        mock_fn = Mock()
+        session1 = Mock()
+        session2 = Mock()
+        key1 = _option_chain_key_builder(mock_fn, session1, "TSLA")
+        key2 = _option_chain_key_builder(mock_fn, session2, "TSLA")
+        assert key1 == key2
+
 
 class TestGetNextOpenTime:
     def test_pre_market_returns_open_at(self):
