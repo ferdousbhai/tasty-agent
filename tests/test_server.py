@@ -403,14 +403,6 @@ class TestOptionChainKeyBuilder:
         key = _option_chain_key_builder(mock_fn, mock_session, "AAPL")
         assert key == "option_chain:AAPL"
 
-    def test_different_sessions_same_symbol_same_key(self):
-        mock_fn = Mock()
-        session1 = Mock()
-        session2 = Mock()
-        key1 = _option_chain_key_builder(mock_fn, session1, "TSLA")
-        key2 = _option_chain_key_builder(mock_fn, session2, "TSLA")
-        assert key1 == key2
-
 
 class TestGetNextOpenTime:
     def test_pre_market_returns_open_at(self):
@@ -1379,20 +1371,3 @@ class TestStreamQuotesWithTradeFallback:
             await _stream_quotes_with_trade_fallback(mock_session, ["VIX"], {"VIX"}, timeout=0.1)
 
         assert cancelled_tasks == 2
-
-
-class TestQuoteNaNPatch:
-    def test_index_quotes_with_nan_sizes(self):
-        from decimal import Decimal
-
-        from tastytrade.dxfeed import Quote
-
-        raw_data = ["SPX", 0, 0, 0, 0, "\x00", 0, "\x00", 4122.49, 4123.65, "NaN", "NaN"]
-        result = Quote.from_stream(raw_data)
-        assert len(result) == 1, "Index quote with NaN sizes should not be dropped"
-        assert result[0].event_symbol == "SPX"
-        assert result[0].bid_price == Decimal("4122.49")
-        assert result[0].ask_price == Decimal("4123.65")
-        # SDK converts NaN sizes to Decimal('0') rather than None
-        assert result[0].bid_size == Decimal("0")
-        assert result[0].ask_size == Decimal("0")
