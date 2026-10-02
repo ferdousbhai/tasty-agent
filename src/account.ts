@@ -4,8 +4,8 @@ import { z } from 'zod'
 import type { Broker } from './broker.js'
 import { compactRow, num, signedMoneyRow, toTable, type Row } from './compact.js'
 import { nyDate } from './time.js'
-import { requestItems, requestObject } from './tastytrade/client.js'
-import { jsonId, jsonObject, jsonText, signedField, type JsonObject, type JsonValue } from './tastytrade/json.js'
+import { requestItems } from './tastytrade/client.js'
+import { jsonId, jsonObject, jsonText, jsonTime, signedField, type JsonObject, type JsonValue } from './tastytrade/json.js'
 
 export const OverviewInput = z.object({
   include: z
@@ -43,7 +43,7 @@ const BALANCE_FIELDS = {
 } as const
 
 function compactBalances(balance: JsonObject): Row {
-  return compactRow({ ...signedMoneyRow(balance, BALANCE_FIELDS), updated_at: jsonText(balance['updated-at']) })
+  return compactRow({ ...signedMoneyRow(balance, BALANCE_FIELDS), updated_at: jsonTime(balance['updated-at']) })
 }
 
 export function compactPosition(position: JsonObject): Row {
@@ -58,7 +58,7 @@ export function compactPosition(position: JsonObject): Row {
       mark: num(position['mark-price'] ?? position.mark),
       day_gain: num(signedField(position, 'realized-day-gain')),
       today: num(signedField(position, 'realized-today')),
-      expires: jsonText(position['expires-at']),
+      expires: jsonTime(position['expires-at']),
     },
     { dropZero: true },
   )
@@ -97,8 +97,8 @@ export function compactOrder(order: JsonObject): Row {
       price: num(signedField(order, 'price')),
       size: num(order.size),
       legs: compactOrderLegs(order.legs),
-      received_at: jsonText(order['received-at']),
-      updated_at: jsonText(order['updated-at']),
+      received_at: jsonTime(order['received-at']),
+      updated_at: jsonTime(order['updated-at']),
       reject_reason: jsonText(order['reject-reason']),
     },
     { dropZero: true },
@@ -115,7 +115,7 @@ function compactTransaction(transaction: JsonObject): Row {
   }, new Decimal(0))
   return compactRow(
     {
-      date: jsonText(transaction['executed-at']) ?? jsonText(transaction['transaction-date']),
+      date: jsonTime(transaction['executed-at']) ?? jsonText(transaction['transaction-date']),
       type: jsonText(transaction['transaction-type']),
       sub_type: jsonText(transaction['transaction-sub-type']),
       symbol: jsonText(transaction.symbol),
@@ -135,7 +135,10 @@ function compactTransaction(transaction: JsonObject): Row {
 export async function accountOverview(broker: Broker, { include }: z.infer<typeof OverviewInput>): Promise<Row> {
   const account = await broker.accountPath()
   const [balances, positions] = await Promise.all([
-    include.includes('balances') ? requestObject(broker.client, `${account}/balances`) : undefined,
+    // Balances come back one row per currency; the USD row is the account's.
+    include.includes('balances')
+      ? requestItems(broker.client, `${account}/balances`).then((rows) => rows.find((row) => row.currency === 'USD') ?? rows[0])
+      : undefined,
     include.includes('positions')
       ? requestItems(broker.client, `${account}/positions`, { query: { 'include-marks': true } })
       : undefined,

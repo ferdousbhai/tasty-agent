@@ -60,7 +60,7 @@ function instrumentTickSize(detail: InstrumentDetail, price: Decimal): Decimal {
       `Missing broker tick sizes for ${detail.label}. Cannot safely round the order price to the broker's tick grid.`,
     )
   }
-  return tick.schedule === 'fixed' ? tick.size : tickSizeAt(tick.tiers, price, tick.schedule, detail.label)
+  return 'size' in tick ? tick.size : tickSizeAt(tick.tiers, price, detail.label)
 }
 
 function gcd(left: number, right: number): number {

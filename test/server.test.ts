@@ -66,7 +66,9 @@ describe('mcp server', () => {
 
   it('serves account output through the handler', async () => {
     const result = await rpc(
-      (call) => (call.path === '/accounts/5WT00001/balances' ? { 'net-liquidating-value': '1000.50', 'cash-balance': '0.0' } : undefined),
+      (call) => (call.path === '/accounts/5WT00001/balances'
+          ? { items: [{ currency: 'USD', 'net-liquidating-value': '1000.50', 'cash-balance': '0.0' }] }
+          : undefined),
       'tools/call',
       { name: 'account_overview', arguments: { include: ['balances'] } },
     )

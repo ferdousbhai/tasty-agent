@@ -72,7 +72,7 @@ describe('instrument resolution', () => {
     const { broker } = fakeBroker((call) => (call.path === '/futures-option-chains/ES/nested' ? esChain : undefined))
     const [detail] = await broker.instruments.resolveAll([{ symbol: '/ES', option_type: 'C', strike_price: 6000, expiration_date: '2026-12-18' }])
     expect(detail).toMatchObject({ kind: 'Future Option', symbol: './ESZ6 ESZ6 261218C6000', streamerSymbol: './ESZ26C6000:XCME' })
-    expect(detail!.tick?.schedule).toBe('ceiling')
+    expect(detail!.tick).toEqual({ tiers: [expect.anything(), expect.anything()] })
   })
 
   it('lists available strikes for a missing contract', async () => {

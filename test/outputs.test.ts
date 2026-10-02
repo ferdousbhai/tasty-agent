@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { accountHistory, compactPosition, HistoryInput } from '../src/account.js'
+import { accountHistory, compactOrder, compactPosition, HistoryInput } from '../src/account.js'
 import { toTable, toolXml } from '../src/compact.js'
 import { compactGreeks, compactMarketMetric, compactQuote, exchangesForSymbols, legQuote, marketStatus, nextOpenTime } from '../src/market.js'
 import { compactWatchlist, manageWatchlist, WatchlistInput } from '../src/watchlists.js'
@@ -90,6 +90,11 @@ describe('compact output', () => {
       today: '-25.5',
       expires: '2026-01-16T21:15:00.000+00:00',
     })
+  })
+
+  it('renders epoch-millisecond timestamps as ISO time', () => {
+    const order = compactOrder({ id: 1, 'updated-at': 1790775524940, legs: [{ action: 'Buy to Open', quantity: 1, symbol: 'X' }] })
+    expect(order.updated_at).toBe('2026-09-30T13:38:44.940Z')
   })
 
   it('pages history from a New York start date', async () => {

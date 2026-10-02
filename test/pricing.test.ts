@@ -54,15 +54,15 @@ describe('order market', () => {
     expect(resolveOrderPrice(market)).toEqual({ price: d('-100.25'), warnings: [] })
   })
 
-  it('uses sub-penny equity ticks below the $1 floor', () => {
-    const detail = equity('PENNY', [{ value: '0.0001' }, { value: '0.01', threshold: '1.00' }])
+  it('uses sub-penny equity ticks below $1 (the payload Tastytrade sends)', () => {
+    const detail = equity('PENNY', [{ threshold: '1.0', value: '0.0001' }, { value: '0.01' }])
     const market = orderMarket([detail], [{ action: 'Buy to Open', quantity: 100 }], [quote('0.1234', '0.1236')])
     expect(market.tickSize.toString()).toBe('0.0001')
     expect(resolveOrderPrice(market)).toEqual({ price: d('-0.1235'), warnings: [] })
   })
 
-  it('uses cent equity ticks from the $1 floor up', () => {
-    const detail = equity('AAPL', [{ value: '0.0001' }, { value: '0.01', threshold: '1.00' }])
+  it('uses cent equity ticks from $1 up', () => {
+    const detail = equity('AAPL', [{ threshold: '1.0', value: '0.0001' }, { value: '0.01' }])
     const market = orderMarket([detail], [{ action: 'Buy to Open', quantity: 100 }], [quote('189.991', '190.009')])
     expect(market.tickSize.toString()).toBe('0.01')
     expect(resolveOrderPrice(market)).toEqual({ price: d('-190'), warnings: [] })

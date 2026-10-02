@@ -23,6 +23,12 @@ export function jsonText(value: unknown): string | undefined {
   return undefined
 }
 
+/** A timestamp field as ISO text; Tastytrade sends some as epoch milliseconds, and 0 for "none". */
+export function jsonTime(value: unknown): string | undefined {
+  if (typeof value !== 'number') return jsonText(value)
+  return Number.isFinite(value) && value > 0 ? new Date(value).toISOString() : undefined
+}
+
 /** An identifier field: numbers stay numbers, anything else is read as text. */
 export function jsonId(value: unknown): number | string | undefined {
   return typeof value === 'number' ? value : jsonText(value)

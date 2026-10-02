@@ -5,7 +5,7 @@ import { decimalText } from './compact.js'
 import { sharedLoad } from './shared-load.js'
 import { requestItems, requestObject, type TastytradeClient } from './tastytrade/client.js'
 import { jsonDecimal, jsonObjects, jsonText, type JsonObject } from './tastytrade/json.js'
-import { parseTickSizes, type TickSchedule, type TickSize } from './tastytrade/tick-sizes.js'
+import { parseTickSizes, type TickSize } from './tastytrade/tick-sizes.js'
 
 const OPTION_FIELDS = {
   option_type: z.enum(['C', 'P']).describe('C=call, P=put.'),
@@ -107,7 +107,7 @@ export interface InstrumentDetail {
   streamerSymbol: string
   /** A human label for messages, e.g. "MSFT C450 2028-01-21". */
   label: string
-  tick: { schedule: TickSchedule; tiers: TickSize[] } | { schedule: 'fixed'; size: Decimal } | undefined
+  tick: { tiers: TickSize[] } | { size: Decimal } | undefined
   sharesPerContract?: Decimal | undefined
 }
 
@@ -359,8 +359,8 @@ export class InstrumentResolver {
 }
 
 /** A tick schedule, or undefined when the broker supplied no tiers (pricing then refuses). */
-export function tickSchedule(schedule: TickSchedule, tiers: TickSize[]): InstrumentDetail['tick'] {
-  return tiers.length ? { schedule, tiers } : undefined
+export function tickSchedule(tiers: TickSize[]): InstrumentDetail['tick'] {
+  return tiers.length ? { tiers } : undefined
 }
 
 function equityDetail(equity: JsonObject, symbol: string, requestedIndex: boolean): InstrumentDetail {
@@ -373,7 +373,7 @@ function equityDetail(equity: JsonObject, symbol: string, requestedIndex: boolea
     symbol,
     streamerSymbol: isIndex ? streamerSymbol! : symbol,
     label: symbol,
-    tick: tickSchedule('floor', parseTickSizes(equity['tick-sizes'], symbol)),
+    tick: tickSchedule(parseTickSizes(equity['tick-sizes'], symbol)),
   }
 }
 
@@ -386,7 +386,7 @@ function futureDetail(future: JsonObject, symbol: string): InstrumentDetail {
     symbol: jsonText(future.symbol) ?? symbol,
     streamerSymbol,
     label: symbol,
-    tick: size?.gt(0) ? { schedule: 'fixed', size } : undefined,
+    tick: size?.gt(0) ? { size } : undefined,
   }
 }
 
@@ -419,7 +419,7 @@ function optionDetail(contract: ChainContract, underlying: string, kind: 'Equity
     symbol: contract.symbol,
     streamerSymbol: contract.streamerSymbol,
     label: `${underlying} ${contract.optionType}${contract.strike} ${contract.expiration}`,
-    tick: tickSchedule('ceiling', contract.tickSizes),
+    tick: tickSchedule(contract.tickSizes),
     sharesPerContract: sharesPerContract?.gt(0) ? sharesPerContract : undefined,
   }
 }
