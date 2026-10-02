@@ -1,9 +1,7 @@
-**/__pycache__/
-.cache
 .claude
 .env
-.venv
-data
+.dev.vars
+.wrangler
 dist
-*.ipynb
-tasty_agent/_version.py
+node_modules
+dist-worker
