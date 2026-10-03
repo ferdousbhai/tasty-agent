@@ -54,29 +54,22 @@ describe('order market', () => {
     expect(resolveOrderPrice(market)).toEqual({ price: d('-100.25'), warnings: [] })
   })
 
-  it('uses sub-penny equity ticks below $1 (the payload Tastytrade sends)', () => {
-    const detail = equity('PENNY', [{ threshold: '1.0', value: '0.0001' }, { value: '0.01' }])
-    const market = orderMarket([detail], [{ action: 'Buy to Open', quantity: 100 }], [quote('0.1234', '0.1236')])
-    expect(market.tickSize.toString()).toBe('0.0001')
+  // Tastytrade's own payloads: SPY's `tick-sizes` and SPX's `option-tick-sizes`.
+  const equityTiers = [{ threshold: '1.0', value: '0.0001' }, { value: '0.01' }]
+  const optionTiers = [{ threshold: '3', value: '0.05' }, { threshold: 'Infinity', value: '0.10' }]
+  it.each([
+    ['below it', equityTiers, '0.1234', '0.1236', '0.0001'],
+    ['above it', equityTiers, '189.991', '190.009', '0.01'],
+    ['below it, with an Infinity top tier', optionTiers, '2.80', '2.90', '0.05'],
+    ['exactly at it', optionTiers, '2.90', '3.10', '0.1'],
+  ])('reads a tick threshold as an exclusive upper bound: mid %s', (_, tiers, bid, ask, tick) => {
+    const market = orderMarket([equity('X', tiers)], [{ action: 'Buy to Open', quantity: 1 }], [quote(bid, ask)])
+    expect(market.tickSize.toString()).toBe(tick)
+  })
+
+  it('prices on a sub-penny tick', () => {
+    const market = orderMarket([equity('PENNY', equityTiers)], [{ action: 'Buy to Open', quantity: 100 }], [quote('0.1234', '0.1236')])
     expect(resolveOrderPrice(market)).toEqual({ price: d('-0.1235'), warnings: [] })
-  })
-
-  it('uses cent equity ticks from $1 up', () => {
-    const detail = equity('AAPL', [{ threshold: '1.0', value: '0.0001' }, { value: '0.01' }])
-    const market = orderMarket([detail], [{ action: 'Buy to Open', quantity: 100 }], [quote('189.991', '190.009')])
-    expect(market.tickSize.toString()).toBe('0.01')
-    expect(resolveOrderPrice(market)).toEqual({ price: d('-190'), warnings: [] })
-  })
-
-  it('reads option thresholds as exclusive upper bounds', () => {
-    const tiers = [
-      { value: '0.05', threshold: '3' },
-      { value: '0.10', threshold: 'Infinity' },
-    ]
-    const below = orderMarket([option('.X', tiers)], [{ action: 'Buy to Open', quantity: 1 }], [quote('2.80', '2.90')])
-    expect(below.tickSize.toString()).toBe('0.05')
-    const above = orderMarket([option('.X', tiers)], [{ action: 'Buy to Open', quantity: 1 }], [quote('3.00', '3.40')])
-    expect(above.tickSize.toString()).toBe('0.1')
   })
 
   it('rounds a one-tick-wide option market to the nearest tick and warns', () => {

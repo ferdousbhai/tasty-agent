@@ -1,7 +1,7 @@
 import { Decimal } from 'decimal.js'
 
 import { Broker } from '../src/broker.js'
-import { ChainCache, tickSchedule, type InstrumentDetail } from '../src/instruments.js'
+import { ChainCache, type InstrumentDetail } from '../src/instruments.js'
 import { parseTickSizes } from '../src/tastytrade/tick-sizes.js'
 import type { RequestOptions, TastytradeClient } from '../src/tastytrade/client.js'
 import type { JsonValue } from '../src/tastytrade/json.js'
@@ -46,7 +46,7 @@ export function parseToolXml(text: string, tag: string): unknown {
 
 /** Resolved instruments for pricing and output tests; tick schedules take the provider's JSON shape. */
 export function equity(symbol: string, tickSizes: unknown = [{ value: '0.01' }]): InstrumentDetail {
-  return { kind: 'Equity', symbol, streamerSymbol: symbol, label: symbol, tick: tickSchedule(parseTickSizes(tickSizes as never, symbol)) }
+  return { kind: 'Equity', symbol, streamerSymbol: symbol, label: symbol, tickSizes: parseTickSizes(tickSizes as never, symbol) }
 }
 
 export function option(symbol: string, optionTickSizes?: unknown): InstrumentDetail {
@@ -55,11 +55,11 @@ export function option(symbol: string, optionTickSizes?: unknown): InstrumentDet
     symbol,
     streamerSymbol: symbol,
     label: symbol,
-    tick: tickSchedule(parseTickSizes(optionTickSizes as never, symbol)),
+    tickSizes: parseTickSizes(optionTickSizes as never, symbol),
     sharesPerContract: new Decimal(100),
   }
 }
 
 export function future(symbol: string): InstrumentDetail {
-  return { kind: 'Future', symbol, streamerSymbol: symbol, label: symbol, tick: { size: new Decimal('0.25') } }
+  return { kind: 'Future', symbol, streamerSymbol: symbol, label: symbol, tickSizes: [{ threshold: null, value: new Decimal('0.25') }] }
 }

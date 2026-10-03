@@ -54,13 +54,12 @@ function roundToTick(value: Decimal, tickSize: Decimal): Decimal {
 }
 
 function instrumentTickSize(detail: InstrumentDetail, price: Decimal): Decimal {
-  const tick = detail.tick
-  if (!tick) {
+  if (!detail.tickSizes.length) {
     throw new Error(
       `Missing broker tick sizes for ${detail.label}. Cannot safely round the order price to the broker's tick grid.`,
     )
   }
-  return 'size' in tick ? tick.size : tickSizeAt(tick.tiers, price, detail.label)
+  return tickSizeAt(detail.tickSizes, price, detail.label)
 }
 
 function gcd(left: number, right: number): number {
