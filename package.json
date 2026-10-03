@@ -1,0 +1,58 @@
+{
+  "name": "tasty-agent",
+  "version": "7.0.0",
+  "description": "A Model Context Protocol server for Tastytrade brokerage accounts",
+  "license": "MIT",
+  "author": "Ferdous <ferdous@hey.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ferdousbhai/tasty-agent.git"
+  },
+  "keywords": [
+    "tastytrade",
+    "trading",
+    "mcp",
+    "model context protocol",
+    "broker"
+  ],
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "tasty-agent": "dist/stdio.js"
+  },
+  "exports": {
+    ".": "./dist/server.js",
+    "./tastytrade": "./dist/tastytrade/index.js"
+  },
+  "files": [
+    "dist",
+    "!dist/**/*.test.*"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "check": "tsc --noEmit && tsc --noEmit -p tsconfig.worker.json",
+    "test": "vitest run",
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "start": "node dist/stdio.js",
+    "prepublishOnly": "npm run check && npm test && npm run build"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/server": "^2.2.0",
+    "decimal.js": "^10.6.0",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261002.1",
+    "@types/node": "^26.6.4",
+    "typescript": "^6.0.2",
+    "vitest": "^5.0.3",
+    "wrangler": "^4.147.0"
+  },
+  "allowScripts": {
+    "esbuild@0.28.1": true,
+    "workerd@1.20261001.1": true
+  }
+}

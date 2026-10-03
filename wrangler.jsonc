@@ -1,0 +1,15 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "tasty-agent",
+  "main": "src/worker/index.ts",
+  "compatibility_date": "2026-09-01",
+  "observability": { "enabled": true },
+  // One Durable Object instance holds the shared two-requests-per-second broker budget.
+  "durable_objects": {
+    "bindings": [{ "name": "BROKER_GATE", "class_name": "BrokerGate" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["BrokerGate"] }]
+  // Secrets (set with `npx wrangler secret put <NAME>`):
+  //   TASTYTRADE_CLIENT_SECRET, TASTYTRADE_REFRESH_TOKEN, MCP_BEARER_TOKEN
+  // Optional: TASTYTRADE_ACCOUNT_ID (required when the grant exposes several accounts).
+}

@@ -1,34 +1,40 @@
 # tasty-agent
 
-MCP server for Tastytrade account data, market data, watchlists, and order workflows.
+MCP server for Tastytrade account data, market data, watchlists, and order workflows. TypeScript, calling the Tastytrade REST API and DXLink directly; runs over stdio (`npx tasty-agent`) and on Cloudflare Workers.
 
 ## Code index
 
-- `tasty_agent/server.py` — FastMCP tools, transport entry point, rate limiting, and orchestration
-- `tasty_agent/orders.py` — instrument resolution, leg construction, quote-derived pricing, tick rounding, and budget sizing
-- `tasty_agent/core.py` — session and account lifecycle
-- `tasty_agent/market_data.py` — DXLink quotes and Greeks
-- `tasty_agent/account_helpers.py` — compact account, balance, position, order, and transaction output
-- `tasty_agent/watchlists.py` — watchlist operations
-- `tests/` — unit and credential-gated integration tests
-- `examples/` — local clients and deployment examples
+- `src/tastytrade/` — standalone Tastytrade client (no MCP imports; exported as `tasty-agent/tastytrade` for reuse, e.g. by spicytrade): OAuth token refresh, request gate, API versions, errors, tick-size schedules, DXLink feed
+- `src/server.ts` — MCP tool, prompt, and schema registration
+- `src/instruments.ts` — instrument specs, resolution, nested option-chain cache
+- `src/pricing.ts` — quote-derived signed mid pricing, tick rounding, budget sizing
+- `src/orders.ts` — dry-run-first placement, replacement, cancellation, live orders
+- `src/market.ts` — REST quotes, DXLink Greeks, metrics, market status, symbol search
+- `src/account.ts` — compact balances, positions, orders, transactions, history
+- `src/watchlists.ts` — watchlist operations
+- `src/broker.ts` — per-request broker context and account selection
+- `src/stdio.ts` — stdio entry point (npm bin)
+- `src/worker/` — Cloudflare Worker entry point (bearer auth, `/mcp`) and the `BrokerGate` Durable Object
+- `test/` — vitest unit tests with a fake client; `integration.test.ts` is credential-gated
 - `commands/portfolio.md` — Claude Code command surface
 - `skills/trading/SKILL.md` — Claude Code trading skill
 
 ## Boundaries
 
-- All broker SDK calls must share the two-requests-per-second limiter in `server.py`. Today only the history, order and symbol-search tools take it; the rest calling the SDK directly is a known gap to close, not a licence to add more unthrottled calls.
-- Option chains use the existing 24-hour cache; tests that depend on chain changes must invalidate it explicitly.
-- Order pricing must use the helpers in `orders.py`; preserve signed debit/credit semantics and broker dry-run safety.
-- Keep MCP output compact and never replace selected projections with full SDK payloads.
+- Every broker call goes through `TastytradeClient.request`, which acquires the shared gate (two requests per second) first. Never call `fetch` against Tastytrade elsewhere.
+- Shared code under `src/` must use only web-standard APIs so it runs on both Node and Workers; Node-only code lives in `src/stdio.ts`, Workers-only code in `src/worker/`.
+- On Workers, module state may hold settled values only (tokens, account number, chains) — never a pending promise.
+- Option chains use the 24-hour `ChainCache`; tests that depend on chain changes must use a fresh cache.
+- Order pricing must use `pricing.ts` with `decimal.js`, never JS floats; preserve signed debit/credit semantics. Every placement and replacement is dry-run first and refused on any dry-run warning; mutations are never retried, and an unanswered one is reported as an unknown outcome.
+- Keep MCP output compact and never replace selected projections with full API payloads.
 
 ## Commands
 
 ```sh
-uv run pytest
-uv run ruff check .
-uv run ruff format --check .
-uv run pyright
+npm run check
+npm test
+npm run build
+npx wrangler deploy --dry-run --outdir dist-worker
 ```
 
 Credential-gated tests and live brokerage calls require explicit authorization.
