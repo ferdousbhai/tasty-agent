@@ -1,7 +1,6 @@
 .claude
 .env
 .dev.vars
-.wrangler
+.cloudflare
 dist
 node_modules
-dist-worker

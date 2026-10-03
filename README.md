@@ -93,18 +93,18 @@ Add `"TASTYTRADE_ACCOUNT_ID": "your_account_id"` only if your grant exposes more
 
 ### Remote (Cloudflare Workers)
 
-[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/ferdousbhai/tasty-agent)
-
-The button forks the repo, prompts for the secrets, and deploys. Or deploy from a checkout:
+The Worker is configured in `cloudflare.config.ts` and deployed with the [`cf` CLI](https://www.npmjs.com/package/cf). From a checkout:
 
 ```bash
 npm install
-npx wrangler login
-npx wrangler secret put TASTYTRADE_CLIENT_SECRET
-npx wrangler secret put TASTYTRADE_REFRESH_TOKEN
-npx wrangler secret put MCP_BEARER_TOKEN        # e.g. the output of: openssl rand -hex 32
-npx wrangler secret put TASTYTRADE_ACCOUNT_ID   # only for multi-account grants
-npm run deploy
+npx cf auth login
+npm run deploy                                         # builds and deploys the Worker
+# with the values exported in your shell; MCP_BEARER_TOKEN is e.g. the output of: openssl rand -hex 32
+for name in TASTYTRADE_CLIENT_SECRET TASTYTRADE_REFRESH_TOKEN MCP_BEARER_TOKEN; do
+  npx cf workers secrets update "$name" --worker tasty-agent --text "${!name}"
+done
+# only for multi-account grants:
+npx cf workers secrets update TASTYTRADE_ACCOUNT_ID --worker tasty-agent --text "$TASTYTRADE_ACCOUNT_ID"
 ```
 
 The server is then at `https://tasty-agent.<your-subdomain>.workers.dev/mcp` (streamable HTTP). Connect with the bearer token, for example in Claude Code:
@@ -114,7 +114,7 @@ claude mcp add --transport http tastytrade https://tasty-agent.<your-subdomain>.
   --header "Authorization: Bearer $MCP_BEARER_TOKEN"
 ```
 
-To redeploy on every push, connect your fork under the Worker's **Settings → Builds** in the Cloudflare dashboard, with build command `npm run workers-builds:build` and deploy command `npx wrangler deploy`; a failing check stops the deploy.
+To redeploy on every push, connect your fork under the Worker's **Settings → Builds** in the Cloudflare dashboard, with build command `npm run workers-builds:build` and deploy command `npx cf build && npx cf deploy --prebuilt`; a failing check stops the deploy.
 
 The Worker serves only your own account: anyone holding the bearer token can trade it, so treat the token like the refresh token.
 
@@ -157,7 +157,7 @@ import { createTastytradeClient, IntervalGate, collectFeedEvents } from 'tasty-a
 npm install
 npm run check     # type-check the Node and Worker builds
 npm test          # unit tests; test/integration.test.ts runs live only when credentials are set
-npm run dev       # local Worker via wrangler (put secrets in .dev.vars, see .dev.vars.example)
+npm run dev       # local Worker via Vite (put secrets in .dev.vars, see .dev.vars.example)
 
 # Debug with MCP inspector
 npm run build && npx @modelcontextprotocol/inspector node dist/stdio.js

@@ -36,12 +36,12 @@ MCP server for Tastytrade account data, market data, watchlists, and order workf
 npm run check
 npm test
 npm run build
-npx wrangler deploy --dry-run --outdir dist-worker
+npx cf build && npx cf deploy --prebuilt --dry-run
 ```
 
 ## Releasing
 
-There is no GitHub CI. Cloudflare Workers Builds deploys the Worker on every push to `main`, running `npm run workers-builds:build` (type-check and tests) before `npx wrangler deploy`; a failing check stops the deploy.
+There is no GitHub CI. Cloudflare Workers Builds deploys the Worker on every push to `main`, running `npm run workers-builds:build` (type-check and tests) before `npx cf build && npx cf deploy --prebuilt`; a failing check stops the deploy.
 
 To release the npm package, bump the version in `package.json`, `src/version.ts`, and `.claude-plugin/plugin.json` together, then run `npm publish --access public` locally (`prepublishOnly` checks, tests, and builds first) and push a `v<version>` tag.
 
