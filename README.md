@@ -114,6 +114,8 @@ claude mcp add --transport http tastytrade https://tasty-agent.<your-subdomain>.
   --header "Authorization: Bearer $MCP_BEARER_TOKEN"
 ```
 
+To redeploy on every push, connect your fork under the Worker's **Settings → Builds** in the Cloudflare dashboard, with build command `npm run workers-builds:build` and deploy command `npx wrangler deploy`; a failing check stops the deploy.
+
 The Worker serves only your own account: anyone holding the bearer token can trade it, so treat the token like the refresh token.
 
 ### Reusing the Tastytrade client
