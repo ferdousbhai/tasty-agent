@@ -3,8 +3,8 @@
   "compilerOptions": {
     "module": "ESNext",
     "moduleResolution": "Bundler",
-    "types": ["@cloudflare/workers-types"]
+    "types": []
   },
-  "include": ["src"],
+  "include": ["src", ".cloudflare/types/index.d.ts"],
   "exclude": ["src/stdio.ts"]
 }
