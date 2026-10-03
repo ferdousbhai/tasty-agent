@@ -38,7 +38,7 @@
     "deploy": "cf build && cf deploy --prebuilt",
     "start": "node dist/stdio.js",
     "prepublishOnly": "npm run check && npm test && npm run build",
-    "workers-builds:build": "npm ci && npm run check && npm test"
+    "workers-builds:build": "npm ci && npm run check && npm test && cf build"
   },
   "dependencies": {
     "@modelcontextprotocol/server": "^2.2.0",
