@@ -5,7 +5,13 @@ A Model Context Protocol server for TastyTrade brokerage accounts. Enables LLMs 
 
 Written in TypeScript against the Tastytrade REST API and DXLink directly (no SDK). The same code runs locally over stdio (`npx tasty-agent`) or as a remote MCP server on Cloudflare Workers.
 
-> **v7 is a rewrite.** The Python package (`uvx tasty-agent`, 6.x) is replaced by the npm package. Tool names and arguments are unchanged except: `get_quotes` no longer takes `timeout` (quotes come from REST market data), and orders are refused when the broker's dry run returns any warning.
+> **v7 is a rewrite.** The Python package (`uvx tasty-agent`, 6.x) is replaced by the npm package, and the Modal deployment by Cloudflare Workers. Tool names are unchanged. What differs from 6.x:
+> - `get_quotes` no longer takes `timeout`: quotes come from REST market data, so they also answer outside market hours.
+> - `get_greeks` accepts at most 100 contracts and a `timeout` of at most 30 seconds.
+> - Orders and replacements are refused when the broker's dry run returns any warning.
+> - A cancel, order, or watchlist change the broker may have applied without answering reports an unknown outcome instead of failing.
+> - Prices are rounded with the broker's tick schedules read as upper bounds (e.g. sub-penny below $1, a cent from $1), and futures options can now be priced.
+> - The `GTD` time-in-force and the local SSE/HTTP transports are gone; a blank `TASTYTRADE_ACCOUNT_ID` counts as unset.
 
 ## Authentication
 
@@ -20,7 +26,7 @@ Written in TypeScript against the Tastytrade REST API and DXLink directly (no SD
 | --- | --- | --- |
 | `TASTYTRADE_CLIENT_SECRET` | yes | OAuth app client secret |
 | `TASTYTRADE_REFRESH_TOKEN` | yes | Personal OAuth grant refresh token |
-| `TASTYTRADE_ACCOUNT_ID` | when the grant exposes several accounts | May be omitted for a single-account grant |
+| `TASTYTRADE_ACCOUNT_ID` | no | Needed only when the grant exposes several accounts; otherwise the one account is used |
 | `TASTYTRADE_API_BASE` | no | Defaults to `https://api.tastyworks.com`; use `https://api.cert.tastyworks.com` for the sandbox |
 | `MCP_BEARER_TOKEN` | Cloudflare only | Clients must send `Authorization: Bearer <token>` |
 
@@ -31,7 +37,7 @@ Written in TypeScript against the Tastytrade REST API and DXLink directly (no SD
 
 ### Market Data & Research
 - **`get_quotes(instruments)`** - Live bid/ask/mid quotes for stocks, options, futures, and indices (indices without a two-sided market report their last price)
-- **`get_greeks(options, timeout=10.0)`** - Greeks (delta, gamma, theta, vega, rho) for equity and futures options via DXLink streaming
+- **`get_greeks(options, timeout=10.0)`** - Greeks (delta, gamma, theta, vega, rho) for equity and futures options via DXLink streaming (up to 100 contracts, timeout at most 30s)
 - **`get_market_metrics(symbols)`** - IV rank, percentile, beta, liquidity for multiple symbols
 - **`market_status(exchanges=['Equity'])`** - Market hours, status, holidays, and current NYC time ('Equity', 'CME', 'CFE', 'Smalls')
 - **`search_symbols(symbol, limit=10)`** - Search for symbols by name/ticker
@@ -44,7 +50,7 @@ Written in TypeScript against the Tastytrade REST API and DXLink directly (no SD
   - `quantity` is the actual share/contract count. `target_value=50000` sizes an equity or equity-option order from quote-derived pricing; omit `quantity` for single-leg target-value orders. For multi-leg spreads with `target_value`, use `quantity` only to express the leg ratio, such as 1:1 or 2:1.
   - Order prices are aligned to the broker's valid tick grid before submission. If tick-size data is unavailable, the tool fails before placement instead of submitting an invalid price increment.
   - Every order is sent to the broker as a dry run first. Any dry-run warning refuses the order; `dry_run=true` returns the preview and marks such an order `blocked`.
-  - If the broker does not answer a submission (timeout or 5xx), the tool reports an unknown outcome and never retries; check `list_orders` before placing again.
+  - If the broker does not answer a submission (timeout or 5xx), the tool reports an unknown outcome and never retries; check `list_orders` before placing again. Cancels and watchlist changes are handled the same way.
   - Equities and options use `Buy to Open`, `Buy to Close`, `Sell to Open`, or `Sell to Close`; futures use `Buy` or `Sell`.
 - **`replace_order(order_id)`** - Reprice an existing live order at the current quote-derived mid (dry-run checked the same way).
 - **`cancel_order(order_id)`** - Cancel an order.
@@ -76,13 +82,14 @@ Requires Node.js 22+. Add to your MCP client configuration (e.g., `claude_deskto
       "args": ["-y", "tasty-agent@7"],
       "env": {
         "TASTYTRADE_CLIENT_SECRET": "your_client_secret",
-        "TASTYTRADE_REFRESH_TOKEN": "your_refresh_token",
-        "TASTYTRADE_ACCOUNT_ID": "your_account_id"
+        "TASTYTRADE_REFRESH_TOKEN": "your_refresh_token"
       }
     }
   }
 }
 ```
+
+Add `"TASTYTRADE_ACCOUNT_ID": "your_account_id"` only if your grant exposes more than one account.
 
 ### Remote (Cloudflare Workers)
 

@@ -39,4 +39,8 @@ npm run build
 npx wrangler deploy --dry-run --outdir dist-worker
 ```
 
+## Releasing
+
+Bump the version in `package.json`, `src/version.ts`, and `.claude-plugin/plugin.json` together, then push a `v<version>` tag. `.github/workflows/publish.yml` publishes to npm (needs the `NPM_TOKEN` repo secret) and deploys the Worker (skipped unless `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` are set).
+
 Credential-gated tests and live brokerage calls require explicit authorization.

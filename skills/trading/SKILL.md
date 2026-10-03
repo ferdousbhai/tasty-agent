@@ -27,7 +27,7 @@ Interact with TastyTrade brokerage accounts via the tasty-agent MCP server. Cove
 - `place_order` always uses quote-derived mid pricing; do not pass raw prices.
 - `place_order` aligns prices to the broker's valid tick grid; do not retry unchanged if tick-size data is unavailable.
 - Every order is dry-run at the broker first. If the dry run returns any warning, the order is refused; report the warning to the user rather than retrying. `dry_run=true` previews and marks such orders as `blocked`.
-- An "outcome unknown" error means the broker may have received the order. Check `list_orders` before placing it again.
+- An "outcome unknown" error means the broker may have applied the change (an order, cancel, or watchlist edit) without answering. Check `list_orders` or the watchlist before trying again.
 - `quantity` is the actual share/contract count. For dollar-budget orders, pass top-level `target_value` and omit `quantity` for single-leg orders. For multi-leg spreads with `target_value`, use `quantity` only to express the leg ratio, such as 1:1 or 2:1.
 - For replacing an order, call `replace_order(order_id)` to reprice at current mid.
 - Do not use underlying stock quotes as option order prices. `place_order` resolves the exact instrument quote and validates the signed net limit against the current bid/ask market.
