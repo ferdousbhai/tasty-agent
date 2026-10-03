@@ -180,6 +180,12 @@ describe('replace_order', () => {
     const result = await replaceOrder(broker, { order_id: '900' })
     expect(result.pricing).toMatchObject({ limit: '-63.35' })
     expect(client.calls.some((call) => call.path.includes('option-chains'))).toBe(false)
+
+    // Once the chain is cached (by a placement), a replacement needs no instrument lookup at all.
+    await placeOrder(broker, { legs: [msftLeg], time_in_force: 'Day', dry_run: true })
+    const before = client.calls.length
+    await replaceOrder(broker, { order_id: '900' })
+    expect(client.calls.slice(before).some((call) => call.path.startsWith('/instruments/'))).toBe(false)
   })
 
   it('refuses an order id that is not live', async () => {

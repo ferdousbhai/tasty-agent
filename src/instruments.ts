@@ -242,9 +242,12 @@ export class InstrumentResolver {
       return { symbol, type, action, quantity }
     })
     const symbolsOf = (type: string) => legs.filter((leg) => leg.type === type).map((leg) => leg.symbol)
-    // An equity option leg already names its contract; pricing needs only the underlying's option ticks.
+    // An equity option leg already names its contract; pricing needs only the underlying's option
+    // ticks, which a cached chain carries and the equities request otherwise fetches.
+    const cachedChain = new Map((this.chains.get(equityChainKey(underlying)) ?? []).map((contract) => [contract.symbol, contract]))
+    const uncachedOptions = symbolsOf('Equity Option').filter((symbol) => !cachedChain.has(symbol))
     const { equities, futures, futureOptions } = this.prefetch({
-      equities: [...symbolsOf('Equity'), ...(symbolsOf('Equity Option').length ? [underlying] : [])],
+      equities: [...symbolsOf('Equity'), ...(uncachedOptions.length ? [underlying] : [])],
       futures: symbolsOf('Future'),
       futureOptions: symbolsOf('Future Option'),
     })
@@ -254,7 +257,9 @@ export class InstrumentResolver {
           return equityDetail((await equities).get(symbol)!, symbol, false)
         case 'Future':
           return futureDetail((await futures).get(symbol)!, symbol)
-        case 'Equity Option':
+        case 'Equity Option': {
+          const contract = cachedChain.get(symbol)
+          if (contract) return optionDetail(contract, underlying, type)
           return {
             kind: type,
             symbol,
@@ -262,6 +267,7 @@ export class InstrumentResolver {
             label: symbol,
             tickSizes: parseTickSizes((await equities).get(underlying)!['option-tick-sizes'], underlying),
           }
+        }
         case 'Future Option': {
           const root = jsonText((await futureOptions).get(symbol)!['root-symbol'])
           if (!root) throw new Error(`Tastytrade instrument ${symbol} is missing root-symbol`)
