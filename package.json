@@ -1,6 +1,6 @@
 {
   "name": "tasty-agent",
-  "version": "7.0.0",
+  "version": "7.1.0",
   "description": "A Model Context Protocol server for Tastytrade brokerage accounts",
   "license": "MIT",
   "author": "Ferdous <ferdous@hey.com>",

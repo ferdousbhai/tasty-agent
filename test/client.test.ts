@@ -8,6 +8,7 @@ import {
   TastytradeTransportError,
 } from '../src/tastytrade/errors.js'
 import { IntervalGate } from '../src/tastytrade/gate.js'
+import { tastytradeApiVersion } from '../src/tastytrade/versions.js'
 
 type Sent = { url: string; init: RequestInit }
 
@@ -127,13 +128,88 @@ describe('tastytrade client', () => {
     })
     const error = await client.request('/a').catch((caught: unknown) => caught)
     expect(error).toBeInstanceOf(TastytradeAuthError)
+    expect(error).toMatchObject({ reason: 'refused', status: 401 })
     expect((error as Error).message).toContain('invalid_grant: Grant revoked')
+  })
+
+  it('names a malformed token response by what is missing', async () => {
+    const client = createTastytradeClient({ clientSecret: 's', refreshToken: 'r', fetch: async () => Response.json({ access_token: 't' }) })
+    await expect(client.request('/a')).rejects.toMatchObject({ reason: 'invalid-lifetime' })
+  })
+
+  it('returns the whole body when asked, keeping pagination beside data', async () => {
+    const page = { data: { items: [] }, pagination: { 'total-items': 3 } }
+    const { client } = harness(() => Response.json(page))
+    expect(await client.request('/accounts/1/orders', { raw: true })).toEqual(page)
   })
 
   it('encodes array parameters as repeated keys', () => {
     expect(buildQuery({ equity: ['AAPL', 'MSFT'], 'equity-option': ['AAPL  261218C00150000'], skip: undefined, n: 2 })).toBe(
       '?equity=AAPL&equity=MSFT&equity-option=AAPL++261218C00150000&n=2',
     )
+  })
+})
+
+describe('client credentials', () => {
+  it('uses a caller-minted access token without refreshing or retrying it', async () => {
+    const sent: string[] = []
+    const client = createTastytradeClient({
+      accessToken: 'member-token',
+      fetch: async (input, init) => {
+        sent.push(`${new URL(String(input)).pathname} ${new Headers(init?.headers).get('Authorization')}`)
+        return Response.json({}, { status: 401 })
+      },
+    })
+    await expect(client.request('/accounts/1/positions')).rejects.toBeInstanceOf(TastytradeApiError)
+    expect(sent).toEqual(['/accounts/1/positions Bearer member-token'])
+  })
+
+  it('reads lazy secrets only when a token has to be minted', async () => {
+    let reads = 0
+    const secret = (value: string) => async () => {
+      reads += 1
+      return value
+    }
+    const client = createTastytradeClient({
+      clientSecret: secret('s'),
+      refreshToken: secret('r'),
+      fetch: async (input, init) =>
+        String(input).endsWith('/oauth/token')
+          ? Response.json({ access_token: JSON.parse(String(init?.body)).refresh_token, expires_in: 900 })
+          : Response.json({ data: {} }),
+    })
+    await client.request('/a')
+    await client.request('/b')
+    expect(reads).toBe(2)
+  })
+
+  it('aborts a request on the caller signal', async () => {
+    const client = createTastytradeClient({
+      accessToken: 't',
+      // Like real fetch: an already-aborted signal rejects at once, a later abort rejects then.
+      fetch: (_input, init) =>
+        new Promise((_resolve, reject) => {
+          if (init?.signal?.aborted) reject(init.signal.reason)
+          init?.signal?.addEventListener('abort', () => reject(init.signal?.reason))
+        }),
+    })
+    const controller = new AbortController()
+    const pending = client.request('/accounts/1/orders', { method: 'POST', body: {}, signal: controller.signal })
+    controller.abort(new Error('deadline'))
+    // An aborted mutation may still have reached the broker.
+    await expect(pending).rejects.toBeInstanceOf(TastytradeOutcomeUnknownError)
+  })
+})
+
+describe('API versions', () => {
+  it('uses each endpoint family version and leaves unversioned APIs alone', () => {
+    expect(tastytradeApiVersion('/accounts/A1/balances')).toBe('20240501')
+    expect(tastytradeApiVersion('/accounts/A1/positions?include-marks=true')).toBe('20240501')
+    expect(tastytradeApiVersion('/option-chains/NVDA')).toBe('20250715')
+    expect(tastytradeApiVersion('/accounts/A1/orders/live?per-page=200')).toBe('20260427')
+    expect(tastytradeApiVersion('/accounts/A1/complex-orders/dry-run')).toBe('20260427')
+    expect(tastytradeApiVersion('/market-metrics?symbols=NVDA')).toBeUndefined()
+    expect(tastytradeApiVersion('/watchlists')).toBeUndefined()
   })
 })
 

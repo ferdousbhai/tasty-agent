@@ -126,6 +126,8 @@ The REST client, rate gate, tick-size rules, and DXLink feed have no MCP depende
 import { createTastytradeClient, IntervalGate, collectFeedEvents } from 'tasty-agent/tastytrade'
 ```
 
+`createTastytradeClient` authenticates with either an OAuth grant it refreshes itself (`clientSecret` / `refreshToken`, each a string or an async getter read only when a token is minted) or a caller-minted `accessToken`, which is never refreshed or retried. Every request, including token refreshes, goes through the `gate` you pass. `request(path, { raw: true })` returns the whole response body (with `pagination`), and `signal` aborts a request early. A mutation that fails without a definite answer raises `TastytradeOutcomeUnknownError`. spicytrade uses this client for its own transport.
+
 ## Examples
 
 ```

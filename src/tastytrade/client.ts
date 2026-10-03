@@ -53,11 +53,25 @@ export interface RequestOptions {
   method?: 'GET' | 'POST' | 'PUT' | 'DELETE'
   query?: Record<string, QueryValue>
   body?: JsonValue
+  /** Aborts the request early (for example a submission deadline); the timeout still applies. */
+  signal?: AbortSignal
+  /** Return the parsed body as sent (with `pagination` beside `data`) instead of its `data` member. */
+  raw?: boolean
 }
 
-export interface TastytradeClientOptions {
-  clientSecret: string
-  refreshToken: string
+/** A credential value, or a function that reads it only when a token actually has to be minted. */
+export type Secret = string | (() => Promise<string>)
+
+/**
+ * How the client authenticates: an OAuth grant it refreshes itself, or an access token the caller
+ * minted (for example a per-request token from the account holder), which is never refreshed and
+ * never retried on 401.
+ */
+export type TastytradeCredentials =
+  | { clientSecret: Secret; refreshToken: Secret; accessToken?: never }
+  | { accessToken: string; clientSecret?: never; refreshToken?: never }
+
+export type TastytradeClientOptions = TastytradeCredentials & {
   apiBase?: string
   gate?: RequestGate
   tokenStore?: TokenStore
@@ -69,7 +83,7 @@ export interface TastytradeClientOptions {
 
 export interface TastytradeClient {
   /**
-   * Calls one endpoint and returns the response's unwrapped `data` member ({} for an empty body).
+   * Calls one endpoint and returns the response's `data` member, or with `raw` the whole body ({} for an empty body).
    * A mutation (any non-GET other than a dry run) that fails ambiguously is raised as
    * `TastytradeOutcomeUnknownError`, because the broker may have applied it.
    */
@@ -100,35 +114,37 @@ export function createTastytradeClient(options: TastytradeClientOptions): Tastyt
   const now = options.now ?? Date.now
 
   async function refreshAccessToken(): Promise<string> {
+    const [clientSecret, refreshToken] = await Promise.all([reveal(options.clientSecret!), reveal(options.refreshToken!)])
     await gate.acquire()
     let response: Response
     try {
       response = await doFetch(`${apiBase}/oauth/token`, {
         method: 'POST',
         headers: { Accept: 'application/json', 'Content-Type': 'application/json', 'User-Agent': userAgent },
-        body: JSON.stringify({
-          grant_type: 'refresh_token',
-          client_secret: options.clientSecret,
-          refresh_token: options.refreshToken,
-        }),
+        body: JSON.stringify({ grant_type: 'refresh_token', client_secret: clientSecret, refresh_token: refreshToken }),
         signal: AbortSignal.timeout(timeoutMs),
       })
     } catch (error) {
-      throw new TastytradeAuthError('Tastytrade OAuth token refresh failed without a response', { cause: error })
+      throw new TastytradeAuthError('unreachable', 'Tastytrade OAuth token refresh failed without a response', undefined, {
+        cause: error,
+      })
     }
     if (!response.ok) {
       const messages = await brokerMessages(response)
       const detail = messages.length ? `: ${messages.join('; ')}` : ''
       throw new TastytradeAuthError(
+        'refused',
         `Tastytrade OAuth token refresh was refused (${response.status})${detail}. ` +
           'Check TASTYTRADE_CLIENT_SECRET and TASTYTRADE_REFRESH_TOKEN.',
+        response.status,
       )
     }
     const payload = jsonObject(await readBoundedJson(response, MAX_ERROR_BYTES, '/oauth/token'))
     const token = jsonText(payload?.access_token)
     const lifetimeSeconds = payload?.expires_in
-    if (!token || typeof lifetimeSeconds !== 'number' || !(lifetimeSeconds > 0)) {
-      throw new TastytradeAuthError('Tastytrade OAuth token response is missing access_token or expires_in')
+    if (!token) throw new TastytradeAuthError('missing-token', 'Tastytrade OAuth token response has no access_token')
+    if (typeof lifetimeSeconds !== 'number' || !(lifetimeSeconds > 0)) {
+      throw new TastytradeAuthError('invalid-lifetime', 'Tastytrade OAuth token response has no positive expires_in')
     }
     const lifetimeMs = lifetimeSeconds * 1000
     // Retire the token early enough that it outlives any request it is handed to.
@@ -140,6 +156,7 @@ export function createTastytradeClient(options: TastytradeClientOptions): Tastyt
   // Concurrent requests on one client share a single refresh.
   let pendingRefresh: Promise<string> | undefined
   async function accessToken(): Promise<string> {
+    if (options.accessToken !== undefined) return options.accessToken
     const cached = tokens.get()
     if (cached && now() < cached.expiresAt) return cached.token
     pendingRefresh ??= refreshAccessToken().finally(() => {
@@ -163,7 +180,7 @@ export function createTastytradeClient(options: TastytradeClientOptions): Tastyt
         method: request.method ?? 'GET',
         headers,
         body: request.body === undefined ? undefined : JSON.stringify(request.body),
-        signal: AbortSignal.timeout(timeoutMs),
+        signal: request.signal ? AbortSignal.any([request.signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs),
       })
     } catch (error) {
       throw new TastytradeTransportError(redactEndpoint(path), error)
@@ -175,9 +192,9 @@ export function createTastytradeClient(options: TastytradeClientOptions): Tastyt
     const endpoint = redactEndpoint(path)
     let token = await accessToken()
     let response = await send(path, request, token)
-    // A revoked or early-expired token is retried once, but only for reads: a mutation is
-    // never sent twice.
-    if (response.status === 401 && method === 'GET') {
+    // A revoked or early-expired token is retried once, but only for reads (a mutation is never
+    // sent twice) and only for a grant the client can refresh itself.
+    if (response.status === 401 && method === 'GET' && options.accessToken === undefined) {
       await response.body?.cancel()
       if (tokens.get()?.token === token) tokens.set(undefined)
       token = await accessToken()
@@ -192,6 +209,7 @@ export function createTastytradeClient(options: TastytradeClientOptions): Tastyt
     }
     const payload = await readBoundedJson(response, MAX_RESPONSE_BYTES, endpoint)
     if (payload === undefined) return {}
+    if (request.raw) return payload
     const body = jsonObject(payload)
     return body && 'data' in body ? (body.data ?? {}) : payload
   }
@@ -214,6 +232,10 @@ export function createTastytradeClient(options: TastytradeClientOptions): Tastyt
       }
     },
   }
+}
+
+function reveal(secret: Secret): Promise<string> {
+  return typeof secret === 'string' ? Promise.resolve(secret) : secret()
 }
 
 export function buildQuery(query: Record<string, QueryValue> | undefined): string {
