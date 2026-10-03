@@ -37,7 +37,8 @@
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "start": "node dist/stdio.js",
-    "prepublishOnly": "npm run check && npm test && npm run build"
+    "prepublishOnly": "npm run check && npm test && npm run build",
+    "workers-builds:build": "npm ci && npm run check && npm test"
   },
   "dependencies": {
     "@modelcontextprotocol/server": "^2.2.0",
