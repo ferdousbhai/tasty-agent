@@ -242,11 +242,11 @@ export class InstrumentResolver {
       return { symbol, type, action, quantity }
     })
     const symbolsOf = (type: string) => legs.filter((leg) => leg.type === type).map((leg) => leg.symbol)
+    // An equity option leg already names its contract; pricing needs only the underlying's option ticks.
     const { equities, futures, futureOptions } = this.prefetch({
-      equities: symbolsOf('Equity'),
+      equities: [...symbolsOf('Equity'), ...(symbolsOf('Equity Option').length ? [underlying] : [])],
       futures: symbolsOf('Future'),
       futureOptions: symbolsOf('Future Option'),
-      optionUnderlyings: symbolsOf('Equity Option').length ? [underlying] : [],
     })
     const resolve = async ({ symbol, type }: (typeof legs)[number]): Promise<InstrumentDetail> => {
       switch (type) {
@@ -255,11 +255,19 @@ export class InstrumentResolver {
         case 'Future':
           return futureDetail((await futures).get(symbol)!, symbol)
         case 'Equity Option':
-          return optionDetail(chainContract(await this.equityOptionChain(underlying, equities), symbol, underlying), underlying, type)
+          return {
+            kind: type,
+            symbol,
+            streamerSymbol: symbol,
+            label: symbol,
+            tickSizes: parseTickSizes((await equities).get(underlying)!['option-tick-sizes'], underlying),
+          }
         case 'Future Option': {
           const root = jsonText((await futureOptions).get(symbol)!['root-symbol'])
           if (!root) throw new Error(`Tastytrade instrument ${symbol} is missing root-symbol`)
-          return optionDetail(chainContract(await this.futureOptionChain(root), symbol, root), root, type)
+          const contract = (await this.futureOptionChain(root)).find((candidate) => candidate.symbol === symbol)
+          if (!contract) throw new Error(`${symbol} is not in the ${root} option chain`)
+          return optionDetail(contract, root, type)
         }
         default:
           throw new Error(`Replacement pricing is not supported for ${type} legs`)
@@ -272,8 +280,8 @@ export class InstrumentResolver {
    * Starts one list request per instrument type. The equities request also carries the underlyings
    * of equity option chains not yet cached, since building a chain needs its underlying's tick schedule.
    */
-  private prefetch(symbols: { equities: string[]; futures: string[]; futureOptions?: string[]; optionUnderlyings: string[] }) {
-    const uncached = symbols.optionUnderlyings.filter((symbol) => !this.chains.get(equityChainKey(symbol)))
+  private prefetch(symbols: { equities: string[]; futures: string[]; futureOptions?: string[]; optionUnderlyings?: string[] }) {
+    const uncached = (symbols.optionUnderlyings ?? []).filter((symbol) => !this.chains.get(equityChainKey(symbol)))
     return {
       equities: this.bySymbol('/instruments/equities', [...symbols.equities, ...uncached]),
       futures: this.bySymbol('/instruments/futures', symbols.futures),
@@ -385,12 +393,6 @@ function futureDetail(future: JsonObject, symbol: string): InstrumentDetail {
     // A future has one fixed tick: a single unbounded tier.
     tickSizes: size?.gt(0) ? [{ threshold: null, value: size }] : [],
   }
-}
-
-function chainContract(chain: ChainContract[], symbol: string, root: string): ChainContract {
-  const contract = chain.find((candidate) => candidate.symbol === symbol)
-  if (!contract) throw new Error(`${symbol} is not in the ${root} option chain`)
-  return contract
 }
 
 function strikeContracts(expiration: JsonObject, sharesPerContract: string | undefined, tickSizes: TickSize[]): ChainContract[] {

@@ -163,6 +163,25 @@ describe('replace_order', () => {
     })
   })
 
+  it('reprices a live option order without downloading its chain', async () => {
+    const live: JsonObject = {
+      id: 900,
+      'underlying-symbol': 'MSFT',
+      'time-in-force': 'Day',
+      'order-type': 'Limit',
+      legs: [{ 'instrument-type': 'Equity Option', symbol: MSFT_CALL, action: 'Buy to Open', quantity: 1 }],
+    }
+    const { broker, client } = fakeBroker((call): JsonValue | undefined => {
+      if (call.path === '/accounts/5WT00001/orders/live') return { items: [live] }
+      if (call.path === '/accounts/5WT00001/orders/900/dry-run') return envelope({ ...live, price: '63.35', 'price-effect': 'Debit' })
+      if (call.path === '/accounts/5WT00001/orders/900') return { ...live, id: 901, price: '63.35', 'price-effect': 'Debit' }
+      return msftRoutes()(call)
+    })
+    const result = await replaceOrder(broker, { order_id: '900' })
+    expect(result.pricing).toMatchObject({ limit: '-63.35' })
+    expect(client.calls.some((call) => call.path.includes('option-chains'))).toBe(false)
+  })
+
   it('refuses an order id that is not live', async () => {
     const { broker } = fakeBroker((call) => (call.path.endsWith('/orders/live') ? { items: [] } : undefined))
     await expect(replaceOrder(broker, { order_id: '1' })).rejects.toThrow('Order 1 not found in live orders')
