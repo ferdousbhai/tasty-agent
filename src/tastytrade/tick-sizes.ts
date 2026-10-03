@@ -1,6 +1,6 @@
 import { Decimal } from 'decimal.js'
 
-import { isJsonObject, jsonDecimal, jsonText, type JsonValue } from './json.js'
+import { isJsonObject, jsonDecimal, jsonText } from './json.js'
 
 // A real schedule has a handful of tiers; a wider fan-out is anomalous data, not a schedule.
 const MAX_TICK_TIERS = 50
@@ -12,7 +12,7 @@ export type TickSize = {
 }
 
 /** Normalizes the provider's two forms (one object or an array of them); absent data is `[]`. */
-export function parseTickSizes(value: JsonValue | undefined, label: string): TickSize[] {
+export function parseTickSizes(value: unknown, label: string): TickSize[] {
   if (value === undefined || value === null) return []
   const rows = Array.isArray(value) ? value : [value]
   if (rows.length > MAX_TICK_TIERS) throw new Error(`${label}: too many tick-size tiers`)
@@ -46,8 +46,8 @@ export function tickSizeAt(tiers: readonly TickSize[], price: Decimal, label: st
   if (unbounded.length > 1 || distinct.size !== bounded.length) {
     throw new Error(`${label}: ambiguous tick-size tiers`)
   }
+  // Every real schedule ends in an unbounded tier; one without it is incomplete, so fail closed.
+  if (!unbounded.length) throw new Error(`${label}: tick-size tiers have no unbounded top tier`)
 
-  const value = bounded.find((tier) => absolute.lt(tier.threshold))?.value ?? unbounded[0]?.value
-  if (!value) throw new Error(`${label}: no tick-size tier covers price ${absolute.toString()}`)
-  return value
+  return bounded.find((tier) => absolute.lt(tier.threshold))?.value ?? unbounded[0]!.value
 }

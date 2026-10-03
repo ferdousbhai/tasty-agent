@@ -73,12 +73,14 @@ export class Broker {
   }
 }
 
-type BrokerConfig = Omit<TastytradeClientOptions, 'userAgent'> & Omit<BrokerOptions, 'client'>
+// Distributes over the credential union, which a plain Omit would collapse.
+type ClientConfig = TastytradeClientOptions extends infer O ? (O extends unknown ? Omit<O, 'userAgent'> : never) : never
+type BrokerConfig = ClientConfig & Omit<BrokerOptions, 'client'>
 
 /** The production wiring shared by the stdio server, the Worker, and the live integration test. */
-export function createBroker({ accountId, chains, memo, ...clientOptions }: BrokerConfig): Broker {
-  const client = createTastytradeClient({ ...clientOptions, userAgent: `tasty-agent/${SERVER_VERSION}` })
-  return new Broker({ client, accountId, chains, memo })
+export function createBroker(config: BrokerConfig): Broker {
+  const client = createTastytradeClient({ ...config, userAgent: `tasty-agent/${SERVER_VERSION}` })
+  return new Broker({ client, accountId: config.accountId, chains: config.chains, memo: config.memo })
 }
 
 export function selectAccount(available: readonly string[], accountId: string | undefined): string {

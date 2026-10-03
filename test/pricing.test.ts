@@ -67,6 +67,13 @@ describe('order market', () => {
     expect(market.tickSize.toString()).toBe(tick)
   })
 
+  it('refuses a schedule without an unbounded top tier', () => {
+    const incomplete = equity('X', [{ threshold: '3', value: '0.05' }])
+    expect(() => orderMarket([incomplete], [{ action: 'Buy to Open', quantity: 1 }], [quote('1.00', '1.10')])).toThrow(
+      'no unbounded top tier',
+    )
+  })
+
   it('prices on a sub-penny tick', () => {
     const market = orderMarket([equity('PENNY', equityTiers)], [{ action: 'Buy to Open', quantity: 100 }], [quote('0.1234', '0.1236')])
     expect(resolveOrderPrice(market)).toEqual({ price: d('-0.1235'), warnings: [] })

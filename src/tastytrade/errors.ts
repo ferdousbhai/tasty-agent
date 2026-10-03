@@ -43,6 +43,18 @@ export class TastytradeOutcomeUnknownError extends Error {
   override readonly name = 'TastytradeOutcomeUnknownError'
 }
 
+export type TastytradeAuthFailure = 'unreachable' | 'refused' | 'missing-token' | 'invalid-lifetime'
+
+/** The OAuth refresh failed; `reason` (and `status` when refused) let callers word it their own way. */
 export class TastytradeAuthError extends Error {
   override readonly name = 'TastytradeAuthError'
+
+  constructor(
+    readonly reason: TastytradeAuthFailure,
+    message: string,
+    readonly status?: number,
+    options?: ErrorOptions,
+  ) {
+    super(message, options)
+  }
 }
