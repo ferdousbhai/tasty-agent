@@ -46,3 +46,10 @@ There is no GitHub CI. Cloudflare Workers Builds deploys the Worker on every pus
 To release the npm package, bump the version in `package.json`, `src/version.ts`, and `.claude-plugin/plugin.json` together, then run `npm publish --access public` locally (`prepublishOnly` checks, tests, and builds first) and push a `v<version>` tag.
 
 Credential-gated tests and live brokerage calls require explicit authorization.
+
+## Cloudflare CLI
+
+Use the `cf` CLI for Cloudflare work in this repository: deploys, builds and their
+logs, secrets, D1, R2, Tunnels and network routes. Use Wrangler or the dashboard
+only where `cf` has no command for the task. Find commands with
+`cf cli search "<what you want to do>"`, then check `<command> --help`.
