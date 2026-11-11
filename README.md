@@ -13,6 +13,16 @@ Written in TypeScript against the Tastytrade REST API and DXLink directly (no SD
 > - Prices are rounded with the broker's tick schedules read as upper bounds (e.g. sub-penny below $1, a cent from $1), and futures options can now be priced.
 > - The `GTD` time-in-force and the local SSE/HTTP transports are gone; a blank `TASTYTRADE_ACCOUNT_ID` counts as unset.
 
+## Trading options?
+
+tasty-agent gives your agent your tastytrade account and leaves the judgement to it. [spicytrade](https://spicy.trade) is the hosted version with guard rails, built on this client: a public market table with IV rank and term structure, a catalyst calendar and a daily options brief, and for signed-in members, orders limited to defined-risk trades that pass tastytrade's dry run. Try the market data and the brief first:
+
+```bash
+claude mcp add --transport http spicytrade https://spicy.trade/mcp
+```
+
+Any MCP client that speaks Streamable HTTP can use the same address. The public tier needs no account and no install. Nothing it returns, the brief included, is investment advice.
+
 ## Authentication
 
 **OAuth Setup**:
